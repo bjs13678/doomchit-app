@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef } from 'react'; import { motion, 
-AnimatePresence } from 'motion/react'; import { Trophy, User, Play, Plus, 
-Upload, Loader2, CheckCircle, Palette, UserCheck, Search, ChevronUp, 
-ChevronDown, Minus, LogIn } from 'lucide-react'; import { doc, getDoc,
+AnimatePresence } from 'motion/react'; import { Trophy, User, Play, Plus,
+Upload, Loader2, CheckCircle, Palette, UserCheck, Search, ChevronUp,
+ChevronDown, Minus, LogIn, Settings, LogOut, X } from 'lucide-react'; import { doc, getDoc,
 collection, addDoc, serverTimestamp, onSnapshot, query, orderBy, limit, where }
 from 'firebase/firestore'; import { onAuthStateChanged } from 
 'firebase/auth'; import { db, auth } from './firebase'; import 
@@ -22,7 +22,87 @@ const PRESET_COLORS = [
 
 interface UserProfile { id: string; displayName: string; photoURL?: string; level: number; exp: number; badges: string[]; }
 interface Clip { index: number; start_frame: number; end_frame: number; duration: number; video_url: string; thumb_url: string; }
-interface ChallengeData { id: string; title: string; creatorName: string; creatorId: string; jobId: string; clips: Clip[]; difficulty: string; likeCount: number; participantCount: number; timestamp: any; }
+interface Track { id: string; title: string; artist: string; albumArt: string | null; previewUrl: string | null; }
+interface ChallengeData { id: string; title: string; creatorName: string; creatorId: string; jobId: string; clips: Clip[]; difficulty: string; likeCount: number; participantCount: number; timestamp: any; music?: Track | null; }
+
+// ── Spotify 음악 검색 컴포넌트 (업로드 + 피드 공용) ──────────────────────────────
+const MusicSearch = ({ onSelect, selected, onClear }: {
+  onSelect: (track: Track | null) => void;
+  selected: Track | null;
+  onClear: () => void;
+}) => {
+  const [query, setQuery] = useState('');
+  const [results, setResults] = useState<Track[]>([]);
+  const [loading, setLoading] = useState(false);
+  const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const search = (q: string) => {
+    if (debounceRef.current) clearTimeout(debounceRef.current);
+    if (!q.trim()) { setResults([]); return; }
+    debounceRef.current = setTimeout(async () => {
+      setLoading(true);
+      try {
+        const url = `https://itunes.apple.com/search?term=${encodeURIComponent(q)}&entity=song&limit=8&country=KR`;
+        const res = await fetch(url);
+        const data = await res.json();
+        setResults((data.results || []).map((t: any) => ({
+          id: String(t.trackId),
+          title: t.trackName,
+          artist: t.artistName,
+          albumArt: t.artworkUrl100 ?? t.artworkUrl60 ?? null,
+          previewUrl: t.previewUrl ?? null,
+        })));
+      } catch { setResults([]); }
+      finally { setLoading(false); }
+    }, 400);
+  };
+
+  if (selected) {
+    return (
+      <div className="flex items-center gap-3 bg-[#7C5CFC]/10 border border-[#7C5CFC]/30 rounded-2xl p-3">
+        {selected.albumArt && <img src={selected.albumArt} className="w-12 h-12 rounded-xl flex-shrink-0 object-cover" alt="" />}
+        <div className="flex-1 min-w-0">
+          <p className="font-black text-sm truncate">{selected.title}</p>
+          <p className="text-xs text-gray-500 truncate">{selected.artist}</p>
+        </div>
+        <button onClick={onClear} className="text-gray-400 hover:text-gray-600 flex-shrink-0 p-1">
+          <Minus size={18} />
+        </button>
+      </div>
+    );
+  }
+
+  return (
+    <div className="space-y-2">
+      <div className="relative">
+        <Search size={16} className="absolute left-4 top-1/2 -translate-y-1/2 text-gray-400" />
+        <input
+          type="text" value={query}
+          onChange={e => { setQuery(e.target.value); search(e.target.value); }}
+          placeholder="제목·가사·아티스트 이름으로 검색"
+          className="w-full bg-gray-50 dark:bg-gray-900 border border-gray-200 dark:border-gray-800 rounded-2xl pl-10 pr-4 py-3 text-sm font-bold outline-none focus:ring-2 focus:ring-[#7C5CFC]"
+        />
+        {loading && <Loader2 size={16} className="absolute right-4 top-1/2 -translate-y-1/2 animate-spin text-[#7C5CFC]" />}
+      </div>
+      {results.length > 0 && (
+        <div className="bg-white dark:bg-gray-950 border border-gray-200 dark:border-gray-800 rounded-2xl overflow-hidden shadow-lg">
+          {results.map(track => (
+            <button key={track.id} onClick={() => { onSelect(track); setQuery(''); setResults([]); }}
+              className="w-full flex items-center gap-3 p-3 hover:bg-gray-50 dark:hover:bg-gray-900 transition-all text-left border-b border-gray-100 dark:border-gray-900 last:border-0">
+              {track.albumArt
+                ? <img src={track.albumArt} className="w-10 h-10 rounded-lg flex-shrink-0 object-cover" alt="" />
+                : <div className="w-10 h-10 rounded-lg bg-gray-200 dark:bg-gray-800 flex-shrink-0" />}
+              <div className="flex-1 min-w-0">
+                <p className="font-bold text-sm truncate">{track.title}</p>
+                <p className="text-xs text-gray-500 truncate">{track.artist}</p>
+              </div>
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+};
 interface AnalysisState {
   jobId: string;
   status: 'analyzing' | 'done' | 'error';
@@ -30,6 +110,7 @@ interface AnalysisState {
   message: string;
   title: string;
   userColor: string;
+  music: Track | null;
 }
 
 // ── 분석 진행 화면 (앱 레벨에서 렌더, 탭 전환과 무관하게 폴링 유지) ──────────────────────
@@ -108,7 +189,7 @@ const AnalysisProgressView = ({ analysis, onDismiss }: { analysis: AnalysisState
 
 // ── 업로드 화면 (인물 감지/선택까지만 담당, 분석은 App 레벨로 위임) ─────────────────────
 const UploadView = ({ onStartAnalysis }: {
-  onStartAnalysis: (data: { jobId: string; title: string; userColor: string; targetColor: string; selectedBox: number[] | null }) => void
+  onStartAnalysis: (data: { jobId: string; title: string; userColor: string; targetColor: string; selectedBox: number[] | null; music: Track | null }) => void
 }) => {
   const [videoFile, setVideoFile] = useState<File | null>(null);
   const [videoPreview, setVideoPreview] = useState<string | null>(null);
@@ -119,6 +200,9 @@ const UploadView = ({ onStartAnalysis }: {
 
   const [userColor, setUserColor] = useState('#00FF00');
   const [targetColor, setTargetColor] = useState('#00FFFF');
+
+  const [selectedMusic, setSelectedMusic] = useState<Track | null>(null);
+  const [noMusic, setNoMusic] = useState(false);
 
   const [jobId, setJobId] = useState('');
   const [frameInfo, setFrameInfo] = useState({ url: '', w: 0, h: 0, boxes: [] as number[][] });
@@ -153,7 +237,7 @@ const UploadView = ({ onStartAnalysis }: {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ targetColor, targetBox: selectedBox })
       });
-      onStartAnalysis({ jobId, title: title.trim(), userColor, targetColor, selectedBox });
+      onStartAnalysis({ jobId, title: title.trim(), userColor, targetColor, selectedBox, music: noMusic ? null : selectedMusic });
     } catch (err) {
       alert("분석 시작 실패!");
     }
@@ -206,6 +290,32 @@ const UploadView = ({ onStartAnalysis }: {
 
       <input type="text" value={title} onChange={e => setTitle(e.target.value)} placeholder="멋진 챌린지 제목을 입력하세요" className="w-full bg-gray-50 dark:bg-gray-900 border border-gray-200 dark:border-gray-800 rounded-2xl px-4 py-4 font-bold outline-none focus:ring-2 focus:ring-[#7C5CFC]" />
 
+      {/* 음악 선택 */}
+      <div className="bg-gray-50 dark:bg-gray-900 border border-gray-200 dark:border-gray-800 p-5 rounded-3xl space-y-4">
+        <div className="flex items-center justify-between">
+          <div className="flex items-center gap-2">
+            <span className="text-lg">🎵</span>
+            <h3 className="font-bold">어떤 음악인가요?</h3>
+          </div>
+          <button
+            onClick={() => { setNoMusic(!noMusic); if (!noMusic) setSelectedMusic(null); }}
+            className={`text-xs font-bold px-3 py-1.5 rounded-full transition-all ${noMusic ? 'bg-gray-300 dark:bg-gray-700 text-gray-600 dark:text-gray-300' : 'bg-gray-200 dark:bg-gray-800 text-gray-500'}`}
+          >
+            {noMusic ? '✓ 음악 없음' : '음악 없음'}
+          </button>
+        </div>
+        {!noMusic && (
+          <MusicSearch
+            selected={selectedMusic}
+            onSelect={setSelectedMusic}
+            onClear={() => setSelectedMusic(null)}
+          />
+        )}
+        {!noMusic && !selectedMusic && (
+          <p className="text-xs text-gray-400 font-bold">💡 제목이 기억 안 나도 가사 한 줄이나 아티스트 이름으로 검색해보세요</p>
+        )}
+      </div>
+
       <div className="bg-gray-50 dark:bg-gray-900 border border-gray-200 dark:border-gray-800 p-5 rounded-3xl space-y-5">
         <div className="flex items-center gap-2 mb-2"><Palette className="text-[#7C5CFC]" size={20} /><h3 className="font-bold">스틱맨 색상 설정</h3></div>
         <div>
@@ -234,38 +344,62 @@ const UploadView = ({ onStartAnalysis }: {
   );
 };
 
-// ── 피드 화면 (파이어베이스 기능 + 숏폼 UI) ──────────────────────────────────────────
+// ── 피드 화면 (파이어베이스 기능 + 숏폼 UI + 노래 검색 필터) ─────────────────────────
 const FeedView = ({ onSelectChallenge }: { onSelectChallenge: (c: ChallengeData) => void }) => {
   const [challenges, setChallenges] = useState<ChallengeData[]>([]);
+  const [filterTrack, setFilterTrack] = useState<Track | null>(null);
 
   useEffect(() => {
     const q = query(collection(db, 'challenges'), orderBy('timestamp', 'desc'), limit(20));
     return onSnapshot(q, snap => setChallenges(snap.docs.map(d => ({ id: d.id, ...d.data() } as ChallengeData))));
   }, []);
 
+  const displayed = filterTrack
+    ? challenges.filter(c => c.music?.id === filterTrack.id)
+    : challenges;
+
   return (
-    <div className="p-4 pb-24 space-y-6">
-      <div className="flex justify-between items-center px-2">
-        <h2 className="text-2xl font-black">추천 챌린지</h2>
-        <div className="flex gap-3 text-sm font-bold text-gray-400">
-          <button className="text-[#7C5CFC]">최신순</button>
-          <button>인기순</button>
-        </div>
+    <div className="p-4 pb-24 space-y-4">
+      {/* 노래로 챌린지 검색 */}
+      <div className="space-y-2">
+        <p className="text-xs font-bold text-gray-400 px-1">🎵 노래로 찾기</p>
+        <MusicSearch
+          selected={filterTrack}
+          onSelect={setFilterTrack}
+          onClear={() => setFilterTrack(null)}
+        />
       </div>
 
-      {challenges.length === 0 && (
+      <div className="flex justify-between items-center px-1 pt-2">
+        <h2 className="text-xl font-black">
+          {filterTrack ? `"${filterTrack.title}" 챌린지` : '추천 챌린지'}
+        </h2>
+        {filterTrack && (
+          <button onClick={() => setFilterTrack(null)} className="text-xs font-bold text-[#7C5CFC]">전체 보기</button>
+        )}
+      </div>
+
+      {displayed.length === 0 && (
         <div className="flex flex-col items-center justify-center mt-20 gap-4 text-gray-400">
           <Upload size={48} strokeWidth={1} />
-          <p className="font-bold text-center">아직 챌린지가 없어요!<br />첫 챌린지를 만들어보세요 🕺</p>
+          <p className="font-bold text-center">
+            {filterTrack ? `"${filterTrack.title}" 챌린지가 아직 없어요!\n첫 챌린지를 만들어보세요 🕺` : '아직 챌린지가 없어요!\n첫 챌린지를 만들어보세요 🕺'}
+          </p>
         </div>
       )}
 
-      {challenges.map(c => (
+      {displayed.map(c => (
         <div key={c.id} onClick={() => onSelectChallenge(c)} className="relative aspect-[3/4] bg-gray-200 dark:bg-gray-900 rounded-[2rem] overflow-hidden shadow-lg group cursor-pointer">
           {c.clips && c.clips[0] && <img src={`${API_URL}${c.clips[0].thumb_url}`} className="absolute inset-0 w-full h-full object-cover" alt={c.title} />}
           <div className="absolute inset-0 bg-gradient-to-t from-black/80 via-black/20 to-transparent" />
           <div className="absolute bottom-6 left-6 right-6">
             <h3 className="text-white text-3xl font-black mb-1">{c.title}</h3>
+            {c.music && (
+              <div className="flex items-center gap-2 mb-1">
+                {c.music.albumArt && <img src={c.music.albumArt} className="w-5 h-5 rounded" alt="" />}
+                <p className="text-white/90 text-xs font-bold truncate">{c.music.title} — {c.music.artist}</p>
+              </div>
+            )}
             <p className="text-white/70 text-sm font-bold">@{c.creatorName}</p>
           </div>
           <button className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 bg-white/20 backdrop-blur-md p-5 rounded-full opacity-0 group-hover:opacity-100 transition-all">
@@ -292,6 +426,18 @@ export default function App() {
   const [loginHandle, setLoginHandle] = useState('');
   const [myChallenges, setMyChallenges] = useState<ChallengeData[]>([]);
   const [analysis, setAnalysis] = useState<AnalysisState | null>(null);
+  const [showSettings, setShowSettings] = useState(false);
+
+  const handleLogout = () => {
+    if (!confirm('로그아웃 하시겠어요?')) return;
+    localStorage.removeItem('doomchit_user');
+    setUserProfile(null);
+    setIsLoggedIn(false);
+    setLoginHandle('');
+    setMyChallenges([]);
+    setShowSettings(false);
+    setActiveTab('feed');
+  };
 
   // 더미 데이터 (추후 파이어베이스로 교체)
   const DUMMY_OVERALL = [
@@ -348,6 +494,7 @@ export default function App() {
               difficulty: 'Medium',
               likeCount: 0,
               participantCount: 0,
+              music: analysis.music ?? null,
               timestamp: serverTimestamp(),
             });
           } catch (err) { console.warn('Firestore save failed:', err); }
@@ -415,6 +562,7 @@ export default function App() {
                     message: '선택된 인물의 동작을 집중 분석 중...',
                     title: data.title,
                     userColor: data.userColor,
+                    music: data.music,
                   })} />
             )}
             
@@ -453,20 +601,29 @@ export default function App() {
 
             {activeTab === 'profile' && userProfile && (
               <div className="p-4 pb-24">
-                <div className="flex items-center gap-6 mb-8 mt-4">
-                  <div className="w-24 h-24 rounded-full bg-gradient-to-tr from-[#7C5CFC] to-[#D8D8EC] p-1">
-                    <div className="w-full h-full rounded-full border-4 border-white dark:border-black bg-gray-200 dark:bg-gray-800 flex items-center justify-center">
-                      <User size={36} className="text-gray-400" />
+                <div className="flex items-center justify-between mb-6 mt-2">
+                  <div className="flex items-center gap-6">
+                    <div className="w-24 h-24 rounded-full bg-gradient-to-tr from-[#7C5CFC] to-[#D8D8EC] p-1">
+                      <div className="w-full h-full rounded-full border-4 border-white dark:border-black bg-gray-200 dark:bg-gray-800 flex items-center justify-center">
+                        <User size={36} className="text-gray-400" />
+                      </div>
+                    </div>
+                    <div>
+                      <h2 className="text-2xl font-black mb-1">{userProfile.displayName}</h2>
+                      <p className="text-[#7C5CFC] font-bold text-sm">@{userProfile.id}</p>
+                      <div className="flex gap-4 mt-3 text-xs font-bold text-gray-500">
+                        <span>게시물 {myChallenges.length}</span>
+                        <span>레벨 {userProfile.level}</span>
+                      </div>
                     </div>
                   </div>
-                  <div>
-                    <h2 className="text-2xl font-black mb-1">{userProfile.displayName}</h2>
-                    <p className="text-[#7C5CFC] font-bold text-sm">@{userProfile.id}</p>
-                    <div className="flex gap-4 mt-3 text-xs font-bold text-gray-500">
-                      <span>게시물 {myChallenges.length}</span>
-                      <span>레벨 {userProfile.level}</span>
-                    </div>
-                  </div>
+                  <button
+                    onClick={() => setShowSettings(true)}
+                    aria-label="설정"
+                    className="p-2 rounded-full hover:bg-gray-100 dark:hover:bg-gray-900 text-gray-500 hover:text-gray-700 dark:hover:text-gray-300 transition-all"
+                  >
+                    <Settings size={22} />
+                  </button>
                 </div>
                 {myChallenges.length === 0 ? (
                   <div className="flex flex-col items-center justify-center mt-12 gap-4 text-gray-400">
@@ -537,6 +694,46 @@ export default function App() {
             <ChallengeComponent videoUrl={`${API_URL}${challengeClipUrl}`} playbackRate={challengeSpeed} userStickmanColor={userColor} onBack={() => { setChallengeClipUrl(''); setIsLearning(true); }} />
           </div>
         )}
+
+        {/* 설정 바텀 시트 */}
+        <AnimatePresence>
+          {showSettings && (
+            <>
+              <motion.div
+                initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}
+                onClick={() => setShowSettings(false)}
+                className="fixed inset-0 z-[300] bg-black/50 backdrop-blur-sm"
+              />
+              <motion.div
+                initial={{ y: '100%' }} animate={{ y: 0 }} exit={{ y: '100%' }}
+                transition={{ type: 'spring', damping: 30, stiffness: 300 }}
+                className="fixed bottom-0 left-0 right-0 max-w-md mx-auto z-[301] bg-white dark:bg-gray-950 rounded-t-3xl shadow-2xl pb-safe"
+              >
+                <div className="flex items-center justify-between p-5 border-b border-gray-100 dark:border-gray-900">
+                  <h3 className="text-lg font-black flex items-center gap-2">
+                    <Settings size={20} /> 설정
+                  </h3>
+                  <button onClick={() => setShowSettings(false)} className="p-1 text-gray-400 hover:text-gray-600">
+                    <X size={20} />
+                  </button>
+                </div>
+                <div className="p-3">
+                  <div className="px-5 py-3">
+                    <p className="text-xs font-bold text-gray-400 mb-1">로그인 계정</p>
+                    <p className="font-bold">@{userProfile?.id}</p>
+                  </div>
+                  <button
+                    onClick={handleLogout}
+                    className="w-full flex items-center gap-3 px-5 py-4 rounded-2xl text-red-500 hover:bg-red-50 dark:hover:bg-red-500/10 transition-all font-bold"
+                  >
+                    <LogOut size={20} />
+                    로그아웃
+                  </button>
+                </div>
+              </motion.div>
+            </>
+          )}
+        </AnimatePresence>
       </main>
     </div>
   );

@@ -1,1 +1,15 @@
+/* 1. 외부 폰트 임포트는 반드시 파일의 최상단에 위치해야 합니다 */
+@import url('https://fonts.googleapis.com/css2?family=Black+Han+Sans&family=Noto+Sans+KR:wght@400;500;700;900&display=swap');
+
+/* 2. 그 다음 테일윈드 설정을 가져옵니다 */
 @import "tailwindcss";
+
+/* 3. 마지막으로 커스텀 스타일을 정의합니다 */
+body {
+  font-family: 'Noto Sans KR', sans-serif;
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+/* 혹시 기존에 다른 스타일 코드가 더 있었다면 이 아래에 추가하시면 됩니다. */
