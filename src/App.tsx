@@ -1,273 +1,195 @@
-import { useState, useEffect, useRef } from 'react';
-import { motion, AnimatePresence } from 'motion/react';
-import {
-  Trophy, User, Play, ChevronRight, Award,
-  Globe, X, Loader2, Sparkles, Upload, Plus,
-  Heart, CheckCircle
-} from 'lucide-react';
-import { useTranslation } from 'react-i18next';
-import {
-  doc, getDoc, setDoc, collection, addDoc, serverTimestamp,
-  onSnapshot, query, orderBy, limit, updateDoc, increment
-} from 'firebase/firestore';
-import {
-  onAuthStateChanged
-} from 'firebase/auth';
-import { GoogleGenAI } from '@google/genai';
-import { db, auth } from './firebase';
-import './index.css';
-import './i18n';
+import { useState, useEffect, useRef } from 'react'; import { motion, 
+AnimatePresence } from 'motion/react'; import { Trophy, User, Play, Plus, 
+Upload, Loader2, CheckCircle, Palette, UserCheck, Search, ChevronUp, 
+ChevronDown, Minus, LogIn } from 'lucide-react'; import { doc, getDoc,
+collection, addDoc, serverTimestamp, onSnapshot, query, orderBy, limit, where }
+from 'firebase/firestore'; import { onAuthStateChanged } from 
+'firebase/auth'; import { db, auth } from './firebase'; import 
+'./index.css'; import './i18n'; import Learn from './Learn'; import 
+ChallengeComponent from './Challenge';
 
-// ─── Types ────────────────────────────────────────────────────────────────────
+const API_URL = 'http://localhost:8000';
 
-interface Landmark { x: number; y: number; z?: number; visibility?: number; }
+// --- [디자인 폰트 설정] ---
+const LOGO_FONT = "font-['Black_Han_Sans']";
+const MAIN_FONT = "font-['Noto_Sans_KR']";
 
-interface UserProfile {
-  id: string;
-  displayName: string;
-  photoURL?: string;
-  level: number;
-  exp: number;
-  badges: string[];
-}
+const PRESET_COLORS = [
+  { name: '초록', hex: '#00FF00' }, { name: '시안 (파랑)', hex: '#00FFFF' },
+  { name: '노랑', hex: '#FFFF00' }, { name: '마젠타 (분홍)', hex: '#FF00FF' },
+  { name: '흰색', hex: '#FFFFFF' },
+];
 
-interface Challenge {
-  id: string;
+interface UserProfile { id: string; displayName: string; photoURL?: string; level: number; exp: number; badges: string[]; }
+interface Clip { index: number; start_frame: number; end_frame: number; duration: number; video_url: string; thumb_url: string; }
+interface ChallengeData { id: string; title: string; creatorName: string; creatorId: string; jobId: string; clips: Clip[]; difficulty: string; likeCount: number; participantCount: number; timestamp: any; }
+interface AnalysisState {
+  jobId: string;
+  status: 'analyzing' | 'done' | 'error';
+  progress: number;
+  message: string;
   title: string;
-  creatorName: string;
-  creatorId: string;
-  videoUrl: string;
-  poseData: Landmark[][];
-  thumbnail?: string;
-  difficulty: 'Easy' | 'Medium' | 'Hard';
-  likeCount: number;
-  participantCount: number;
-  timestamp: any;
+  userColor: string;
 }
 
-// ─── 상수 ─────────────────────────────────────────────────────────────────────
-
-const POSE_CONNECTIONS: [number, number][] = [
-  [11,12],[11,13],[13,15],[12,14],[14,16],
-  [11,23],[12,24],[23,24],
-  [23,25],[25,27],[24,26],[26,28],
-];
-const FACE_CONNECTIONS: [number, number][] = [
-  [0,1],[1,2],[2,3],[3,7],
-  [0,4],[4,5],[5,6],[6,8],
-  [9,10],
-];
-const KEY_JOINTS = [0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,23,24,25,26,27,28];
-
-// ─── 유틸 함수 ────────────────────────────────────────────────────────────────
-
-function calculateScore(user: Landmark[], target: Landmark[]): number {
-  if (!user?.length || !target?.length) return 0;
-  let total = 0, valid = 0;
-  KEY_JOINTS.forEach(i => {
-    const u = user[i], t = target[i];
-    if (u && t && (u.visibility??1)>0.5 && (t.visibility??1)>0.5) {
-      const dist = Math.sqrt((u.x-t.x)**2 + (u.y-t.y)**2);
-      total += Math.max(0, 1 - dist/0.25);
-      valid++;
-    }
-  });
-  return valid > 0 ? Math.round((total/valid)*100) : 0;
-}
-
-async function getAIFeedback(score: number, accuracy: number, lang: string) {
-  try {
-    const ai = new GoogleGenAI({ apiKey: import.meta.env.VITE_GEMINI_API_KEY });
-    const response = await ai.models.generateContent({
-      model: 'gemini-2.0-flash',
-      contents: `You are a trendy AI dance coach for "지섭이와 준민이".
-Score: ${score}, Accuracy: ${accuracy}%.
-2 sentences max, ${lang==='ko'?'한국어':'English'}, Gen Z style, use emojis.`,
-    });
-    return response.text ?? '';
-  } catch {
-    return lang==='ko' ? '진짜 대박이었어요! 다음엔 퍼펙트 노려봐요! 🔥' : 'Absolutely fire! 🔥';
+// ── 분석 진행 화면 (앱 레벨에서 렌더, 탭 전환과 무관하게 폴링 유지) ──────────────────────
+const AnalysisProgressView = ({ analysis, onDismiss }: { analysis: AnalysisState; onDismiss: () => void }) => {
+  if (analysis.status === 'done') {
+    return (
+      <div className="p-6 flex flex-col items-center justify-center min-h-[80vh] space-y-6">
+        <motion.div initial={{ scale: 0, opacity: 0 }} animate={{ scale: 1, opacity: 1 }} transition={{ type: 'spring', bounce: 0.5 }} className="text-[#7C5CFC]">
+          <CheckCircle size={120} strokeWidth={1.5} />
+        </motion.div>
+        <motion.div initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: 0.3 }} className="text-center space-y-2">
+          <h2 className="text-3xl font-black">분석 완료! 🎉</h2>
+          <p className="text-gray-500 font-bold">"{analysis.title}"</p>
+        </motion.div>
+        <button onClick={onDismiss} className="w-full max-w-sm bg-[#7C5CFC] text-white py-4 rounded-2xl font-bold flex items-center justify-center gap-2 hover:bg-[#684be0] active:scale-95">
+          <Plus size={20} /> 새로 만들기
+        </button>
+      </div>
+    );
   }
-}
 
-// ─── CameraView용 Pose 싱글톤 캐시 ───────────────────────────────────────────
-let cachedPose: any = null;
-async function getCameraPose() {
-  if (cachedPose) return cachedPose;
-  const { Pose } = await import('@mediapipe/pose');
-  const pose = new Pose({ locateFile: f => `https://cdn.jsdelivr.net/npm/@mediapipe/pose/${f}` });
-  pose.setOptions({ modelComplexity: 1, smoothLandmarks: true, minDetectionConfidence: 0.5, minTrackingConfidence: 0.5 });
-  cachedPose = pose;
-  return pose;
-}
+  if (analysis.status === 'error') {
+    return (
+      <div className="p-6 flex flex-col items-center justify-center min-h-[80vh] space-y-6">
+        <div className="text-red-500 text-7xl">⚠️</div>
+        <div className="text-center space-y-2">
+          <h2 className="text-2xl font-black">분석 실패</h2>
+          <p className="text-gray-500 font-bold text-sm break-all">{analysis.message}</p>
+        </div>
+        <button onClick={onDismiss} className="w-full max-w-sm bg-gray-100 dark:bg-gray-800 text-gray-700 dark:text-gray-200 py-4 rounded-2xl font-bold">
+          닫기
+        </button>
+      </div>
+    );
+  }
 
-// ─── 포즈 추출 (업로드 시 클라이언트에서 자동 실행) ─────────────────────────
+  const radius = 90;
+  const circumference = 2 * Math.PI * radius;
+  const offset = circumference - (analysis.progress / 100) * circumference;
 
-async function extractPosesFromVideo(videoFile: File): Promise<Landmark[][]> {
-  return new Promise(async (resolve) => {
-    const { Pose } = await import('@mediapipe/pose');
-    const pose = new Pose({
-      locateFile: f => `https://cdn.jsdelivr.net/npm/@mediapipe/pose/${f}`,
-    });
-    pose.setOptions({
-      modelComplexity: 2,
-      smoothLandmarks: true,
-      enableSegmentation: false,
-      smoothSegmentation: false,
-      minDetectionConfidence: 0.7,
-      minTrackingConfidence: 0.7,
-    });
+  return (
+    <div className="p-6 pb-24 flex flex-col items-center justify-center min-h-[80vh] space-y-8">
+      <div className="text-center space-y-2">
+        <p className="text-xs font-bold text-[#7C5CFC] uppercase tracking-widest">분석 중</p>
+        <h2 className="text-2xl font-black">{analysis.title}</h2>
+      </div>
 
-    const frames: Landmark[][] = [];
-    let lastFrame: Landmark[] | null = null;
+      <div className="relative w-64 h-64 flex items-center justify-center">
+        <svg className="absolute inset-0 -rotate-90" viewBox="0 0 200 200">
+          <circle cx="100" cy="100" r={radius} fill="none" stroke="currentColor" strokeWidth="10" className="text-gray-200 dark:text-gray-800" />
+          <motion.circle
+            cx="100" cy="100" r={radius} fill="none" stroke="#7C5CFC" strokeWidth="10" strokeLinecap="round"
+            strokeDasharray={circumference}
+            animate={{ strokeDashoffset: offset }}
+            transition={{ duration: 0.6, ease: 'easeOut' }}
+          />
+        </svg>
+        <div className="text-center">
+          <p className="text-6xl font-black text-[#7C5CFC]">{analysis.progress}<span className="text-2xl">%</span></p>
+        </div>
+      </div>
 
-    pose.onResults((r: any) => {
-      if (!r.poseLandmarks) return;
+      <div className="bg-[#7C5CFC]/10 rounded-2xl px-5 py-4 max-w-sm w-full">
+        <div className="flex items-center gap-3">
+          <Loader2 className="animate-spin text-[#7C5CFC] flex-shrink-0" size={20} />
+          <p className="font-bold text-[#7C5CFC] text-sm">{analysis.message || 'AI 분석 시작 중...'}</p>
+        </div>
+      </div>
 
-      const lms: Landmark[] = r.poseLandmarks.map((lm: any) => ({
-        x: Math.round(lm.x * 10000) / 10000,
-        y: Math.round(lm.y * 10000) / 10000,
-        visibility: Math.round(lm.visibility * 1000) / 1000,
-      }));
+      <p className="text-xs text-gray-400 text-center font-bold max-w-sm">
+        다른 탭으로 이동해도 분석은 계속됩니다.<br />완료되면 이 화면으로 돌아오세요.
+      </p>
+    </div>
+  );
+};
 
-      // 화면 중앙에 가장 가까운 사람인지 확인 (평균 x가 0.5 기준 0.35 이상 벗어나면 스킵)
-      const avgX = lms.reduce((s, lm) => s + lm.x, 0) / lms.length;
-      if (Math.abs(avgX - 0.5) > 0.35) return;
-
-      // 점프 감지: 주요 관절 평균 이동거리가 0.15 이상이면 이전 프레임 유지
-      if (lastFrame) {
-        const keyJoints = [11, 12, 23, 24];
-        const avgDist = keyJoints.reduce((sum, i) => {
-          const prev = lastFrame![i], curr = lms[i];
-          if (!prev || !curr) return sum;
-          return sum + Math.sqrt((curr.x - prev.x) ** 2 + (curr.y - prev.y) ** 2);
-        }, 0) / keyJoints.length;
-
-        if (avgDist >= 0.15) {
-          frames.push(lastFrame);
-          return;
-        }
-      }
-
-      lastFrame = lms;
-      frames.push(lms);
-    });
-
-    const video = document.createElement('video');
-    video.src = URL.createObjectURL(videoFile);
-    video.muted = true;
-    await new Promise(r => { video.onloadedmetadata = r; });
-
-    const canvas = document.createElement('canvas');
-    canvas.width = video.videoWidth;
-    canvas.height = video.videoHeight;
-    const ctx = canvas.getContext('2d')!;
-
-    const interval = 0.1;
-    let currentTime = 0;
-
-    const processNext = async () => {
-      if (currentTime >= video.duration) {
-        await pose.close();
-        URL.revokeObjectURL(video.src);
-        resolve(frames);
-        return;
-      }
-      video.currentTime = currentTime;
-      await new Promise(r => { video.onseeked = r; });
-      ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
-      await pose.send({ image: canvas });
-      currentTime += interval;
-      setTimeout(processNext, 50);
-    };
-    processNext();
-  });
-}
-
-// ─── UploadView ───────────────────────────────────────────────────────────────
-
-const UploadView = ({ userProfile }: { userProfile: UserProfile | null }) => {
-  const { t } = useTranslation();
+// ── 업로드 화면 (인물 감지/선택까지만 담당, 분석은 App 레벨로 위임) ─────────────────────
+const UploadView = ({ onStartAnalysis }: {
+  onStartAnalysis: (data: { jobId: string; title: string; userColor: string; targetColor: string; selectedBox: number[] | null }) => void
+}) => {
   const [videoFile, setVideoFile] = useState<File | null>(null);
   const [videoPreview, setVideoPreview] = useState<string | null>(null);
   const [title, setTitle] = useState('');
-  const [difficulty, setDifficulty] = useState<'Easy'|'Medium'|'Hard'>('Medium');
-  const [status, setStatus] = useState<'idle'|'analyzing'|'uploading'|'done'>('idle');
-  const [analyzeProgress, setAnalyzeProgress] = useState(0);
+
+  const [status, setStatus] = useState<'idle' | 'detecting' | 'selecting'>('idle');
+  const [progressMsg, setProgressMsg] = useState('');
+
+  const [userColor, setUserColor] = useState('#00FF00');
+  const [targetColor, setTargetColor] = useState('#00FFFF');
+
+  const [jobId, setJobId] = useState('');
+  const [frameInfo, setFrameInfo] = useState({ url: '', w: 0, h: 0, boxes: [] as number[][] });
+
   const fileInputRef = useRef<HTMLInputElement>(null);
 
-  const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (!file) return;
-    if (!file.type.startsWith('video/')) { alert('영상 파일만 올려주세요!'); return; }
-    if (file.size > 100 * 1024 * 1024) { alert('100MB 이하 영상만 가능해요'); return; }
-    setVideoFile(file);
-    setVideoPreview(URL.createObjectURL(file));
-  };
+  const handleUploadAndDetect = async () => {
+    if (!videoFile || !title.trim()) return alert("영상과 제목을 모두 입력해주세요!");
+    setStatus('detecting');
+    setProgressMsg('AI가 영상의 사람들을 찾고 있습니다...');
 
-  const handleUpload = async () => {
-    if (!videoFile || !title.trim() || !userProfile) return;
+    const formData = new FormData();
+    formData.append('file', videoFile);
 
     try {
-      // 1단계: 포즈 분석
-      setStatus('analyzing');
-      setAnalyzeProgress(10);
-      const poseFrames = await extractPosesFromVideo(videoFile);
-      setAnalyzeProgress(100);
-
-      // 2단계: Cloudinary에 영상 업로드
-      setStatus('uploading');
-      const formData = new FormData();
-      formData.append('file', videoFile);
-      formData.append('upload_preset', 'ml_default');
-
-      const res = await fetch(
-        `https://api.cloudinary.com/v1_1/${import.meta.env.VITE_CLOUDINARY_CLOUD_NAME}/video/upload`,
-        { method: 'POST', body: formData }
-      );
+      const res = await fetch(`${API_URL}/upload`, { method: 'POST', body: formData });
       const data = await res.json();
-      console.log('Cloudinary 응답:', data);
-      if (!data.secure_url) throw new Error(data.error?.message ?? JSON.stringify(data));
-      const videoUrl = data.secure_url;
 
-      // 3단계: Firestore에 챌린지 등록
-      await addDoc(collection(db, 'challenges'), {
-        title: title.trim(),
-        creatorName: userProfile.displayName,
-        creatorId: userProfile.id,
-        videoUrl,
-        poseData: JSON.stringify(poseFrames),
-        difficulty,
-        likeCount: 0,
-        participantCount: 0,
-        timestamp: serverTimestamp(),
-      });
-
-      // 4단계: EXP 지급
-      await setDoc(doc(db, 'users', userProfile.id), {
-        exp: (userProfile.exp ?? 0) + 300,
-      }, { merge: true });
-
-      setStatus('done');
+      setJobId(data.job_id);
+      setFrameInfo({ url: data.first_frame_url, w: data.img_width, h: data.img_height, boxes: data.boxes });
+      setStatus('selecting');
     } catch (err) {
-      console.error(err);
-      alert('업로드 중 오류가 났어요. 다시 시도해봐요!');
       setStatus('idle');
+      alert('백엔드 서버에 연결할 수 없습니다. 파이썬 서버를 켜주세요!');
     }
   };
 
+  const handleStartAnalysis = async (selectedBox: number[] | null) => {
+    try {
+      await fetch(`${API_URL}/start/${jobId}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ targetColor, targetBox: selectedBox })
+      });
+      onStartAnalysis({ jobId, title: title.trim(), userColor, targetColor, selectedBox });
+    } catch (err) {
+      alert("분석 시작 실패!");
+    }
+  };
 
-  if (status === 'done') {
+  if (status === 'selecting') {
     return (
-      <div className="p-6 flex flex-col items-center justify-center min-h-[60vh] space-y-6">
-        <motion.div initial={{scale:0}} animate={{scale:1}} className="text-green-500">
-          <CheckCircle size={80} />
-        </motion.div>
-        <h2 className="text-2xl font-black">챌린지 등록 완료!</h2>
-        <p className="text-gray-500 text-center">피드에 올라갔어요. 다른 사람들이 따라할 거예요 🔥</p>
-        <button onClick={() => { setStatus('idle'); setVideoFile(null); setVideoPreview(null); setTitle(''); }}
-          className="bg-orange-600 text-white px-8 py-4 rounded-2xl font-bold">
-          또 올리기
+      <div className="p-6 pb-24 space-y-6">
+        <h2 className="text-2xl font-black uppercase italic flex items-center gap-2">
+          <UserCheck className="text-[#7C5CFC]" /> 인물 선택
+        </h2>
+        <p className="text-gray-500 font-bold text-sm">
+          영상에서 따라 하고 싶은 사람의 <span className="text-[#7C5CFC]">보라색 박스</span>를 터치하세요!
+        </p>
+
+        <div className="relative w-full rounded-2xl overflow-hidden bg-black shadow-lg border border-gray-200 dark:border-gray-800" style={{ aspectRatio: `${frameInfo.w} / ${frameInfo.h}` }}>
+          <img src={`${API_URL}${frameInfo.url}`} alt="First Frame" className="absolute inset-0 w-full h-full object-cover" />
+          {frameInfo.boxes.map((box, i) => {
+            const [x1, y1, x2, y2] = box;
+            const left = (x1 / frameInfo.w) * 100;
+            const top = (y1 / frameInfo.h) * 100;
+            const width = ((x2 - x1) / frameInfo.w) * 100;
+            const height = ((y2 - y1) / frameInfo.h) * 100;
+            
+            return (
+              <div 
+                key={i} onClick={() => handleStartAnalysis(box)}
+                className="absolute border-4 border-[#7C5CFC] bg-[#7C5CFC]/20 cursor-pointer hover:bg-[#7C5CFC]/50 hover:scale-105 transition-all shadow-[0_0_15px_rgba(124,92,252,0.5)]"
+                style={{ left: `${left}%`, top: `${top}%`, width: `${width}%`, height: `${height}%` }}
+              />
+            );
+          })}
+        </div>
+
+        <button onClick={() => handleStartAnalysis(null)} className="w-full bg-gray-100 dark:bg-gray-800 text-gray-700 dark:text-gray-300 py-4 rounded-2xl font-bold hover:bg-gray-200 dark:hover:bg-gray-700 transition-all active:scale-95">
+          전체 분석하기 (건너뛰기)
         </button>
       </div>
     );
@@ -277,604 +199,344 @@ const UploadView = ({ userProfile }: { userProfile: UserProfile | null }) => {
     <div className="p-6 pb-24 space-y-6">
       <h2 className="text-2xl font-black uppercase italic">챌린지 만들기</h2>
 
-      {/* 영상 선택 */}
-      <div
-        onClick={() => fileInputRef.current?.click()}
-        className="relative aspect-video bg-gray-100 rounded-3xl overflow-hidden flex items-center justify-center cursor-pointer border-2 border-dashed border-gray-300 hover:border-orange-400 transition-colors"
-      >
-        {videoPreview ? (
-          <video src={videoPreview} className="w-full h-full object-cover" muted playsInline controls />
-        ) : (
-          <div className="text-center space-y-3">
-            <Upload className="mx-auto text-gray-400" size={40} />
-            <p className="font-bold text-gray-500">영상 파일 선택</p>
-            <p className="text-xs text-gray-400">mp4, mov 등 100MB 이하</p>
-          </div>
-        )}
-        <input ref={fileInputRef} type="file" accept="video/*" className="hidden" onChange={handleFileChange} />
+      <div onClick={() => fileInputRef.current?.click()} className="relative aspect-[3/4] bg-gray-100 dark:bg-gray-900 rounded-3xl overflow-hidden flex items-center justify-center cursor-pointer border-2 border-dashed border-gray-300 dark:border-gray-700 hover:border-[#7C5CFC]">
+        {videoPreview ? <video src={videoPreview} className="w-full h-full object-cover" /> : <div className="flex flex-col items-center gap-2 text-gray-400"><Upload size={40} /><p className="font-bold text-sm">영상을 클릭해서 업로드</p></div>}
+        <input ref={fileInputRef} type="file" accept="video/*" className="hidden" onChange={(e) => { const f = e.target.files?.[0]; if (f) { setVideoFile(f); setVideoPreview(URL.createObjectURL(f)); } }} />
       </div>
 
-      {/* 제목 */}
-      <div className="space-y-2">
-        <label className="text-sm font-bold text-gray-600">챌린지 제목</label>
-        <input
-          type="text"
-          value={title}
-          onChange={e => setTitle(e.target.value)}
-          placeholder="예: 준민이 스쿼트 챌린지 💪"
-          className="w-full border border-gray-200 rounded-2xl px-4 py-3 font-medium focus:outline-none focus:border-orange-400"
-          maxLength={30}
-        />
-      </div>
+      <input type="text" value={title} onChange={e => setTitle(e.target.value)} placeholder="멋진 챌린지 제목을 입력하세요" className="w-full bg-gray-50 dark:bg-gray-900 border border-gray-200 dark:border-gray-800 rounded-2xl px-4 py-4 font-bold outline-none focus:ring-2 focus:ring-[#7C5CFC]" />
 
-      {/* 난이도 */}
-      <div className="space-y-2">
-        <label className="text-sm font-bold text-gray-600">난이도</label>
-        <div className="flex gap-3">
-          {(['Easy','Medium','Hard'] as const).map(d => (
-            <button key={d}
-              onClick={() => setDifficulty(d)}
-              className={`flex-1 py-3 rounded-2xl font-bold text-sm transition-colors ${
-                difficulty===d ? 'bg-orange-600 text-white' : 'bg-gray-100 text-gray-500'
-              }`}>
-              {d==='Easy'?'쉬움':d==='Medium'?'보통':'어려움'}
-            </button>
-          ))}
+      <div className="bg-gray-50 dark:bg-gray-900 border border-gray-200 dark:border-gray-800 p-5 rounded-3xl space-y-5">
+        <div className="flex items-center gap-2 mb-2"><Palette className="text-[#7C5CFC]" size={20} /><h3 className="font-bold">스틱맨 색상 설정</h3></div>
+        <div>
+          <p className="text-xs font-bold text-gray-500 mb-2 flex justify-between items-center"><span>원본 영상 스틱맨 (AI)</span></p>
+          <div className="flex gap-2">{PRESET_COLORS.map(c => <button key={`target-${c.hex}`} onClick={() => setTargetColor(c.hex)} className={`flex-1 h-10 rounded-xl border-2 transition-all ${targetColor === c.hex ? 'border-gray-400 scale-110' : 'border-transparent shadow-sm'}`} style={{ backgroundColor: c.hex }} />)}</div>
+        </div>
+        <div>
+          <p className="text-xs font-bold text-gray-500 mb-2 flex justify-between items-center"><span>내 동작 스틱맨 (웹캠)</span></p>
+          <div className="flex gap-2">{PRESET_COLORS.map(c => <button key={`user-${c.hex}`} onClick={() => setUserColor(c.hex)} className={`flex-1 h-10 rounded-xl border-2 transition-all ${userColor === c.hex ? 'border-gray-400 scale-110' : 'border-transparent shadow-sm'}`} style={{ backgroundColor: c.hex }} />)}</div>
         </div>
       </div>
 
-      {/* 업로드 진행 상태 */}
-      {status !== 'idle' && (
-        <div className="bg-orange-50 rounded-3xl p-5 space-y-3">
-          {status === 'analyzing' && (
-            <>
-              <div className="flex items-center gap-3">
-                <Loader2 className="animate-spin text-orange-600" size={20} />
-                <p className="font-bold text-orange-800">AI가 포즈 분석 중... {analyzeProgress}%</p>
-              </div>
-              <div className="h-2 bg-orange-200 rounded-full"><div className="h-full bg-orange-600 rounded-full transition-all" style={{width:`${analyzeProgress}%`}}/></div>
-              <p className="text-xs text-orange-600">영상 길이에 따라 1~3분 걸려요</p>
-            </>
-          )}
-          {status === 'uploading' && (
-            <div className="flex items-center gap-3">
-              <Loader2 className="animate-spin text-orange-600" size={20} />
-              <p className="font-bold text-orange-800">업로드 중...</p>
-            </div>
-          )}
+      {status === 'detecting' && (
+        <div className="bg-[#7C5CFC]/10 rounded-2xl p-4 space-y-3">
+          <div className="flex items-center gap-3">
+            <Loader2 className="animate-spin text-[#7C5CFC]" size={18} />
+            <p className="font-bold text-[#7C5CFC] text-sm">{progressMsg}</p>
+          </div>
         </div>
       )}
 
-      {/* 업로드 버튼 */}
-      <motion.button
-        whileTap={{ scale: 0.97 }}
-        onClick={handleUpload}
-        disabled={!videoFile || !title.trim() || status !== 'idle'}
-        className="w-full bg-gray-900 text-white py-5 rounded-2xl font-black text-lg disabled:opacity-40 disabled:cursor-not-allowed flex items-center justify-center gap-3"
-      >
-        <Plus size={24} />
-        챌린지 올리기
-      </motion.button>
+      <button onClick={handleUploadAndDetect} disabled={status !== 'idle' || !videoFile} className="w-full bg-[#7C5CFC] text-white py-5 rounded-2xl font-black flex justify-center items-center gap-2 disabled:opacity-50 hover:bg-[#684be0] active:scale-95 transition-all">
+        {status === 'idle' ? <><Plus size={24} /> 인물 찾기 시작</> : <><Loader2 className="animate-spin" /> 처리 중...</>}
+      </button>
     </div>
   );
 };
 
-// ─── FeedView (모든 챌린지 피드) ─────────────────────────────────────────────
-
-const FeedView = ({ onSelectChallenge }: { onSelectChallenge: (c: Challenge) => void }) => {
-  const { i18n } = useTranslation();
-  const [challenges, setChallenges] = useState<Challenge[]>([]);
-  const [loading, setLoading] = useState(true);
+// ── 피드 화면 (파이어베이스 기능 + 숏폼 UI) ──────────────────────────────────────────
+const FeedView = ({ onSelectChallenge }: { onSelectChallenge: (c: ChallengeData) => void }) => {
+  const [challenges, setChallenges] = useState<ChallengeData[]>([]);
 
   useEffect(() => {
     const q = query(collection(db, 'challenges'), orderBy('timestamp', 'desc'), limit(20));
-    return onSnapshot(q, snap => {
-      const result = snap.docs.map(d => {
-        const data = d.data();
-        if (typeof data.poseData === 'string') data.poseData = JSON.parse(data.poseData);
-        return { id: d.id, ...data } as Challenge;
-      });
-      console.log('challenges:', result);
-      setChallenges(result);
-      setLoading(false);
-    });
+    return onSnapshot(q, snap => setChallenges(snap.docs.map(d => ({ id: d.id, ...d.data() } as ChallengeData))));
   }, []);
 
-  const handleLike = async (e: React.MouseEvent, challengeId: string) => {
-    e.stopPropagation();
-    await updateDoc(doc(db, 'challenges', challengeId), { likeCount: increment(1) });
-  };
-
-  if (loading) return <div className="flex justify-center py-20"><Loader2 className="animate-spin text-orange-600" size={40}/></div>;
-
-  if (challenges.length === 0) return (
-    <div className="p-6 flex flex-col items-center justify-center min-h-[60vh] text-center space-y-4">
-      <p className="text-6xl">🎬</p>
-      <p className="font-bold text-xl">아직 챌린지가 없어요</p>
-      <p className="text-gray-500">첫 번째 챌린지를 올려보세요!</p>
-    </div>
-  );
-
   return (
-    <div className="p-4 pb-24 space-y-4">
-      <h2 className="text-2xl font-black uppercase italic px-2">피드</h2>
-      {challenges.map(challenge => (
-        <motion.div
-          key={challenge.id}
-          whileTap={{ scale: 0.98 }}
-          onClick={() => onSelectChallenge(challenge)}
-          className="bg-white border border-gray-100 rounded-3xl overflow-hidden shadow-sm cursor-pointer"
-        >
-          {/* 영상 썸네일 */}
-          <div className="relative aspect-video bg-gray-100">
-            <video
-              src={challenge.videoUrl}
-              className="w-full h-full object-cover"
-              muted playsInline
-              onMouseEnter={e => (e.currentTarget as HTMLVideoElement).play()}
-              onMouseLeave={e => { (e.currentTarget as HTMLVideoElement).pause(); (e.currentTarget as HTMLVideoElement).currentTime = 0; }}
-            />
-            <div className="absolute inset-0 flex items-center justify-center">
-              <div className="bg-black/40 rounded-full p-3">
-                <Play fill="white" className="text-white" size={28} />
-              </div>
-            </div>
-            <span className="absolute top-3 left-3 bg-orange-600 text-white text-[10px] font-bold px-3 py-1 rounded-full uppercase">
-              {challenge.difficulty}
-            </span>
-          </div>
-
-          {/* 정보 */}
-          <div className="p-4 space-y-2">
-            <h3 className="font-bold text-lg leading-tight">{challenge.title}</h3>
-            <div className="flex items-center justify-between">
-              <p className="text-sm text-gray-500">by {challenge.creatorName}</p>
-              <div className="flex items-center gap-4">
-                <button
-                  onClick={e => handleLike(e, challenge.id)}
-                  className="flex items-center gap-1 text-sm text-gray-500 hover:text-red-500 transition-colors"
-                >
-                  <Heart size={16} />
-                  <span>{challenge.likeCount}</span>
-                </button>
-                <span className="text-sm text-gray-400">{challenge.participantCount}명 참여</span>
-              </div>
-            </div>
-          </div>
-        </motion.div>
-      ))}
-    </div>
-  );
-};
-
-// ─── CameraView (챌린지 따라하기) ────────────────────────────────────────────
-
-const CameraView = ({ challenge, onComplete, onClose }: {
-  challenge: Challenge;
-  onComplete: (score: number, accuracy: number) => void;
-  onClose: () => void;
-}) => {
-  const videoRef = useRef<HTMLVideoElement>(null);
-  const challengeVideoRef = useRef<HTMLVideoElement>(null);
-  const canvasRef = useRef<HTMLCanvasElement>(null);
-  const [isAIReady, setIsAIReady] = useState(false);
-  const [isStarted, setIsStarted] = useState(false);
-  const [currentScore, setCurrentScore] = useState(0);
-  const [progress, setProgress] = useState(0);
-  const [countdown, setCountdown] = useState<number|null>(null);
-  const isStartedRef = useRef(false);
-  const totalRef = useRef(0);
-  const frameRef = useRef(0);
-  const rafRef = useRef(0);
-  const poseRef = useRef<any>(null);
-
-  useEffect(() => {
-    let mounted = true;
-    let stream: MediaStream;
-
-    console.log('poseData 길이:', challenge.poseData?.length);
-    console.log('poseData 첫 프레임:', challenge.poseData?.[0]);
-
-    const init = async () => {
-      try {
-        stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'user' } });
-        if (videoRef.current && mounted) { videoRef.current.srcObject = stream; await videoRef.current.play(); }
-      } catch { alert('카메라 권한이 필요해요'); return; }
-
-      const pose = await getCameraPose();
-      if (!mounted) return;
-
-      pose.onResults((results: any) => {
-        if (!canvasRef.current || !mounted) return;
-        const ctx = canvasRef.current.getContext('2d')!;
-        ctx.clearRect(0, 0, canvasRef.current.width, canvasRef.current.height);
-
-        if (results.poseLandmarks) {
-          drawStickman(ctx, results.poseLandmarks, '#EF4444', 4, false);
-          if (isStartedRef.current && challenge.poseData?.length && challengeVideoRef.current) {
-            const fps = challenge.poseData.length / (challengeVideoRef.current.duration || 1);
-            const idx = Math.min(Math.floor(challengeVideoRef.current.currentTime * fps), challenge.poseData.length - 1);
-            const score = calculateScore(results.poseLandmarks, challenge.poseData[idx]);
-            setCurrentScore(score);
-            totalRef.current += score;
-            frameRef.current += 1;
-          }
-        }
-      });
-
-      poseRef.current = pose;
-      setIsAIReady(true);
-
-      const loop = async () => {
-        if (!mounted) return;
-
-        // 빨간 스틱맨: 카메라 분석 (onResults 안에서 clearRect + 빨간 그리기)
-        if (videoRef.current?.readyState >= 2) {
-          try { await pose.send({ image: videoRef.current }); } catch {}
-        }
-
-        // 초록 스틱맨: pose.send 이후에 그려야 clearRect에 안 지워짐
-        if (challenge.poseData?.length && challengeVideoRef.current && canvasRef.current) {
-          const fps = challenge.poseData.length / (challengeVideoRef.current.duration || 1);
-          const idx = Math.min(
-            Math.floor(challengeVideoRef.current.currentTime * fps),
-            challenge.poseData.length - 1
-          );
-          const ctx = canvasRef.current.getContext('2d');
-          if (ctx && challenge.poseData[idx]?.length) {
-            drawGhostStickman(ctx, challenge.poseData[idx]);
-          }
-        }
-
-        rafRef.current = requestAnimationFrame(loop);
-      };
-      rafRef.current = requestAnimationFrame(loop);
-    };
-
-    init();
-    return () => {
-      mounted = false;
-      cancelAnimationFrame(rafRef.current);
-      stream?.getTracks().forEach(t => t.stop());
-      // pose는 캐시 재사용을 위해 close 하지 않음
-    };
-  }, []);
-
-  const drawStickman = (ctx: CanvasRenderingContext2D, lms: Landmark[], color: string, lw: number, ghost: boolean) => {
-    if (!lms?.length || !canvasRef.current) return;
-    const { width: w, height: h } = canvasRef.current;
-    ctx.save();
-
-    if (ghost) {
-      const scale = 0.28;
-      const offsetX = 10;
-      const offsetY = h * 0.72;
-
-      ctx.globalAlpha = 0.7;
-      ctx.strokeStyle = color; ctx.lineWidth = lw; ctx.lineCap = 'round';
-      POSE_CONNECTIONS.forEach(([i, j]) => {
-        const p1 = lms[i], p2 = lms[j];
-        if (p1 && p2 && (p1.visibility ?? 1) > 0.4 && (p2.visibility ?? 1) > 0.4) {
-          ctx.beginPath();
-          ctx.moveTo(offsetX + p1.x * w * scale, offsetY + p1.y * h * scale);
-          ctx.lineTo(offsetX + p2.x * w * scale, offsetY + p2.y * h * scale);
-          ctx.stroke();
-        }
-      });
-      ctx.fillStyle = color;
-      KEY_JOINTS.forEach(i => {
-        const lm = lms[i];
-        if (lm && (lm.visibility ?? 1) > 0.4) {
-          ctx.beginPath();
-          ctx.arc(offsetX + lm.x * w * scale, offsetY + lm.y * h * scale, 4, 0, Math.PI * 2);
-          ctx.fill();
-        }
-      });
-    } else {
-      // 유저 포즈: 전신 + 얼굴
-      ctx.strokeStyle = color; ctx.lineWidth = lw; ctx.lineCap = 'round';
-      [...POSE_CONNECTIONS, ...FACE_CONNECTIONS].forEach(([i, j]) => {
-        const p1 = lms[i], p2 = lms[j];
-        if (p1 && p2 && (p1.visibility ?? 1) > 0.4 && (p2.visibility ?? 1) > 0.4) {
-          ctx.beginPath();
-          ctx.moveTo(p1.x * w, p1.y * h);
-          ctx.lineTo(p2.x * w, p2.y * h);
-          ctx.stroke();
-        }
-      });
-      ctx.fillStyle = '#FFF';
-      KEY_JOINTS.forEach(i => {
-        const lm = lms[i];
-        if (lm && (lm.visibility ?? 1) > 0.4) {
-          ctx.beginPath();
-          ctx.arc(lm.x * w, lm.y * h, 4, 0, Math.PI * 2);
-          ctx.fill();
-        }
-      });
-    }
-
-    ctx.restore();
-  };
-
-  const drawGhostStickman = (ctx: CanvasRenderingContext2D, lms: Landmark[]) => {
-    if (!lms?.length || !canvasRef.current) return;
-    const { width: w, height: h } = canvasRef.current;
-    const scale = 0.28;
-    const offsetX = 10;
-    const offsetY = h * 0.72;
-    ctx.save();
-    ctx.globalAlpha = 0.7;
-    ctx.strokeStyle = '#22C55E'; ctx.lineWidth = 8; ctx.lineCap = 'round';
-    POSE_CONNECTIONS.forEach(([i, j]) => {
-      const p1 = lms[i], p2 = lms[j];
-      if (p1 && p2 && (p1.visibility ?? 1) > 0.4 && (p2.visibility ?? 1) > 0.4) {
-        ctx.beginPath();
-        ctx.moveTo(offsetX + p1.x * w * scale, offsetY + p1.y * h * scale);
-        ctx.lineTo(offsetX + p2.x * w * scale, offsetY + p2.y * h * scale);
-        ctx.stroke();
-      }
-    });
-    ctx.fillStyle = '#22C55E';
-    KEY_JOINTS.forEach(i => {
-      const lm = lms[i];
-      if (lm && (lm.visibility ?? 1) > 0.4) {
-        ctx.beginPath();
-        ctx.arc(offsetX + lm.x * w * scale, offsetY + lm.y * h * scale, 4, 0, Math.PI * 2);
-        ctx.fill();
-      }
-    });
-    ctx.restore();
-  };
-
-  const handleStart = () => {
-    setCountdown(3);
-    const t = setInterval(() => setCountdown(prev => {
-      if (prev===1) { clearInterval(t); isStartedRef.current=true; setIsStarted(true); challengeVideoRef.current?.play(); return null; }
-      return (prev??1)-1;
-    }), 1000);
-  };
-
-  const handleTimeUpdate = () => {
-    const v = challengeVideoRef.current;
-    if (!v) return;
-    const p = (v.currentTime/v.duration)*100;
-    setProgress(p);
-    if (p>=98) {
-      const accuracy = frameRef.current>0 ? Math.round(totalRef.current/frameRef.current) : 0;
-      updateDoc(doc(db,'challenges',challenge.id), { participantCount: increment(1) });
-      onComplete(totalRef.current, accuracy);
-    }
-  };
-
-  return (
-    <div className="fixed inset-0 z-[100] bg-black flex flex-col">
-      <div className="relative flex-1 overflow-hidden">
-        <video ref={videoRef} className="absolute inset-0 w-full h-full object-cover scale-x-[-1]" playsInline muted />
-        <div className="absolute top-24 right-4 w-36 aspect-[9/16] rounded-2xl overflow-hidden border-2 border-white/40 z-20 bg-black">
-          <video ref={challengeVideoRef} src={challenge.videoUrl} className="w-full h-full object-cover" playsInline muted onTimeUpdate={handleTimeUpdate} />
-        </div>
-        <canvas ref={canvasRef} className="absolute inset-0 w-full h-full scale-x-[-1] z-10" width={720} height={1280} />
-
-        {!isAIReady && (
-          <div className="absolute inset-0 z-50 bg-black/80 flex flex-col items-center justify-center gap-4">
-            <Loader2 className="animate-spin text-orange-500" size={48} />
-            <p className="text-white font-bold">AI 코치 준비 중...</p>
-          </div>
-        )}
-        {!isStarted && isAIReady && countdown===null && (
-          <div className="absolute inset-0 z-50 bg-black/60 flex items-center justify-center">
-            <motion.button whileTap={{scale:0.95}} onClick={handleStart}
-              className="bg-orange-600 text-white px-10 py-5 rounded-full font-black text-2xl uppercase italic flex items-center gap-3">
-              <Play fill="white" size={28} /> 시작!
-            </motion.button>
-          </div>
-        )}
-        <AnimatePresence>
-          {countdown!==null && (
-            <div className="absolute inset-0 z-[60] flex items-center justify-center bg-black/50">
-              <motion.div key={countdown} initial={{scale:2,opacity:0}} animate={{scale:1,opacity:1}} exit={{scale:0.5,opacity:0}}
-                className="text-white font-black italic text-9xl">{countdown}</motion.div>
-            </div>
-          )}
-        </AnimatePresence>
-        <div className="absolute top-8 left-4 right-4 flex justify-between items-start z-30">
-          <button onClick={onClose} className="bg-white/20 backdrop-blur-md p-2 rounded-full text-white"><X size={24}/></button>
-          <div className="bg-red-600 px-5 py-2 rounded-2xl text-white font-black italic text-2xl">{currentScore}%</div>
-        </div>
-        <div className="absolute bottom-10 left-4 right-4 z-30 space-y-2">
-          <div className="h-2 bg-white/20 rounded-full overflow-hidden">
-            <motion.div className="h-full bg-orange-500" animate={{width:`${progress}%`}}/>
-          </div>
-          <p className="text-white font-bold">{challenge.title}</p>
-          <p className="text-white/60 text-sm">by {challenge.creatorName}</p>
+    <div className="p-4 pb-24 space-y-6">
+      <div className="flex justify-between items-center px-2">
+        <h2 className="text-2xl font-black">추천 챌린지</h2>
+        <div className="flex gap-3 text-sm font-bold text-gray-400">
+          <button className="text-[#7C5CFC]">최신순</button>
+          <button>인기순</button>
         </div>
       </div>
-    </div>
-  );
-};
 
-// ─── ResultModal ──────────────────────────────────────────────────────────────
-
-const ResultModal = ({ score, accuracy, feedback, onClose }: { score:number; accuracy:number; feedback:string; onClose:()=>void }) => (
-  <motion.div initial={{opacity:0}} animate={{opacity:1}}
-    className="fixed inset-0 z-[200] bg-black/90 flex items-center justify-center p-6">
-    <motion.div initial={{scale:0.9,y:20}} animate={{scale:1,y:0}}
-      className="bg-white rounded-[40px] w-full max-w-sm p-8 text-center space-y-6">
-      <div><Award className="mx-auto text-orange-600 mb-2" size={56}/></div>
-      <h2 className="text-3xl font-black italic uppercase">참 잘했어요!</h2>
-      <div className="grid grid-cols-2 gap-4">
-        <div className="bg-gray-50 p-4 rounded-3xl">
-          <p className="text-[10px] font-bold text-gray-400 uppercase">점수</p>
-          <p className="text-2xl font-black italic">{score.toLocaleString()}</p>
-        </div>
-        <div className="bg-gray-50 p-4 rounded-3xl">
-          <p className="text-[10px] font-bold text-gray-400 uppercase">정확도</p>
-          <p className="text-2xl font-black italic">{accuracy}%</p>
-        </div>
-      </div>
-      <div className="bg-orange-50 p-5 rounded-3xl text-left relative">
-        <Sparkles className="absolute top-2 right-2 text-orange-200" size={20}/>
-        <p className="text-orange-800 text-sm leading-relaxed">{feedback||'...'}</p>
-      </div>
-      <button onClick={onClose} className="w-full bg-gray-900 text-white py-5 rounded-2xl font-bold">다시 도전</button>
-    </motion.div>
-  </motion.div>
-);
-
-// ─── LeaderboardView ──────────────────────────────────────────────────────────
-
-const LeaderboardView = () => {
-  const [submissions, setSubmissions] = useState<any[]>([]);
-  const [loading, setLoading] = useState(true);
-  useEffect(() => {
-    const q = query(collection(db,'submissions'), orderBy('score','desc'), limit(10));
-    return onSnapshot(q, snap => { setSubmissions(snap.docs.map(d=>({id:d.id,...d.data()}))); setLoading(false); });
-  }, []);
-  return (
-    <div className="p-6 pb-24 space-y-6">
-      <h2 className="text-2xl font-black uppercase italic">리더보드</h2>
-      {loading ? <div className="flex justify-center py-12"><Loader2 className="animate-spin text-orange-600"/></div> : (
-        <div className="space-y-3">
-          {submissions.map((s,i) => (
-            <div key={s.id} className="flex items-center gap-4 bg-gray-50 p-4 rounded-3xl">
-              <div className={`w-10 h-10 rounded-2xl flex items-center justify-center font-black italic ${i===0?'bg-orange-600 text-white':'bg-white text-gray-400'}`}>{i+1}</div>
-              <div className="flex-1">
-                <p className="font-bold">{s.displayName||'익명'}</p>
-                <p className="text-xs text-gray-400 uppercase tracking-widest">{s.accuracy}% 정확도 · {s.challengeTitle}</p>
-              </div>
-              <p className="font-black italic text-orange-600">{s.score.toLocaleString()}</p>
-            </div>
-          ))}
+      {challenges.length === 0 && (
+        <div className="flex flex-col items-center justify-center mt-20 gap-4 text-gray-400">
+          <Upload size={48} strokeWidth={1} />
+          <p className="font-bold text-center">아직 챌린지가 없어요!<br />첫 챌린지를 만들어보세요 🕺</p>
         </div>
       )}
-    </div>
-  );
-};
 
-// ─── ProfileView ──────────────────────────────────────────────────────────────
-
-const ProfileView = ({ userProfile }: { userProfile: UserProfile }) => {
-  const expNeeded = (userProfile.level+1)*1000;
-  return (
-    <div className="p-6 pb-24 space-y-6">
-      <h2 className="text-2xl font-black uppercase italic">내 정보</h2>
-      <div className="bg-white rounded-[32px] p-8 shadow-sm border border-gray-100 space-y-6">
-        <div className="flex items-center gap-5">
-          <div className="w-20 h-20 rounded-full bg-orange-100 flex items-center justify-center text-orange-600">
-            <User size={40}/>
+      {challenges.map(c => (
+        <div key={c.id} onClick={() => onSelectChallenge(c)} className="relative aspect-[3/4] bg-gray-200 dark:bg-gray-900 rounded-[2rem] overflow-hidden shadow-lg group cursor-pointer">
+          {c.clips && c.clips[0] && <img src={`${API_URL}${c.clips[0].thumb_url}`} className="absolute inset-0 w-full h-full object-cover" alt={c.title} />}
+          <div className="absolute inset-0 bg-gradient-to-t from-black/80 via-black/20 to-transparent" />
+          <div className="absolute bottom-6 left-6 right-6">
+            <h3 className="text-white text-3xl font-black mb-1">{c.title}</h3>
+            <p className="text-white/70 text-sm font-bold">@{c.creatorName}</p>
           </div>
-          <div>
-            <h3 className="text-xl font-bold">{userProfile.displayName}</h3>
-            <div className="flex items-center gap-2 text-orange-600 font-bold text-sm mt-1">
-              <Award size={14}/><span>LV. {userProfile.level}</span>
-            </div>
-          </div>
+          <button className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 bg-white/20 backdrop-blur-md p-5 rounded-full opacity-0 group-hover:opacity-100 transition-all">
+            <Play fill="white" color="white" size={32} />
+          </button>
         </div>
-        <div className="space-y-2">
-          <div className="flex justify-between text-xs font-bold uppercase tracking-wider text-gray-400">
-            <span>경험치</span><span>{userProfile.exp} / {expNeeded}</span>
-          </div>
-          <div className="h-2 bg-gray-100 rounded-full overflow-hidden">
-            <motion.div initial={{width:0}} animate={{width:`${(userProfile.exp/expNeeded)*100}%`}} className="h-full bg-orange-600"/>
-          </div>
-        </div>
-      </div>
-    </div>
-  );
-};
-
-// ─── Navbar ───────────────────────────────────────────────────────────────────
-
-const Navbar = ({ activeTab, setActiveTab }: { activeTab:string; setActiveTab:(t:string)=>void }) => {
-  const tabs = [
-    { id:'feed', icon:Play, label:'피드' },
-    { id:'upload', icon:Plus, label:'올리기' },
-    { id:'leaderboard', icon:Trophy, label:'랭킹' },
-    { id:'profile', icon:User, label:'내 정보' },
-  ];
-  return (
-    <nav className="fixed bottom-0 left-0 right-0 bg-white/90 backdrop-blur-lg border-t border-gray-100 px-4 py-3 flex justify-around items-center z-50">
-      {tabs.map(tab => (
-        <button key={tab.id} onClick={() => setActiveTab(tab.id)}
-          className={`flex flex-col items-center gap-1 transition-colors ${activeTab===tab.id?'text-orange-600':'text-gray-400'}`}>
-          <tab.icon size={tab.id==='upload'?28:22} />
-          <span className="text-[10px] font-medium">{tab.label}</span>
-        </button>
       ))}
-    </nav>
+    </div>
   );
 };
 
-// ─── App Root ─────────────────────────────────────────────────────────────────
-
+// ── 메인 App ──────────────────────────────────────────
 export default function App() {
+  const [isLoggedIn, setIsLoggedIn] = useState(false);
   const [activeTab, setActiveTab] = useState('feed');
-  const [selectedChallenge, setSelectedChallenge] = useState<Challenge|null>(null);
-  const [userProfile, setUserProfile] = useState<UserProfile|null>(null);
-  const [lastResult, setLastResult] = useState<{score:number;accuracy:number;feedback:string}|null>(null);
-  const { i18n } = useTranslation();
+  const [rankingMode, setRankingMode] = useState<'overall' | 'song'>('overall');
+
+  const [selectedChallenge, setSelectedChallenge] = useState<ChallengeData | null>(null);
+  const [isLearning, setIsLearning] = useState(false);
+  const [challengeClipUrl, setChallengeClipUrl] = useState('');
+  const [challengeSpeed, setChallengeSpeed] = useState(1.0);
+  const [userColor, setUserColor] = useState('#00FF00');
+  const [userProfile, setUserProfile] = useState<UserProfile | null>(null);
+  const [loginHandle, setLoginHandle] = useState('');
+  const [myChallenges, setMyChallenges] = useState<ChallengeData[]>([]);
+  const [analysis, setAnalysis] = useState<AnalysisState | null>(null);
+
+  // 더미 데이터 (추후 파이어베이스로 교체)
+  const DUMMY_OVERALL = [
+    { id: 1, rank: 1, diff: 0, name: "댄싱퀸", total: 45200, max: 99, img: "https://i.pravatar.cc/100?u=1" },
+    { id: 2, rank: 2, diff: 1, name: "둠칫마스터", total: 42100, max: 98, img: "https://i.pravatar.cc/100?u=2" },
+    { id: 3, rank: 3, diff: -1, name: "루키댄서", total: 38000, max: 95, img: "https://i.pravatar.cc/100?u=3" },
+  ];
 
   useEffect(() => {
+    const saved = localStorage.getItem('doomchit_user');
+    if (saved) {
+      try {
+        setUserProfile(JSON.parse(saved));
+        setIsLoggedIn(true);
+      } catch {}
+    }
     return onAuthStateChanged(auth, async (user) => {
-      if (!user) {
-        setUserProfile({ id: 'guest', displayName: '게스트', level: 1, exp: 0, badges: [] });
-        return;
-      }
-      const ref = doc(db, 'users', user.uid);
-      const snap = await getDoc(ref);
-      if (snap.exists()) {
-        setUserProfile({ id: user.uid, ...snap.data() } as UserProfile);
-      } else {
-        const p = { displayName: user.displayName ?? 'User', level: 1, exp: 0, badges: [] };
-        await setDoc(ref, p);
-        setUserProfile({ id: user.uid, ...p });
+      if (user) {
+        const snap = await getDoc(doc(db, 'users', user.uid));
+        setUserProfile(snap.exists()
+          ? { id: user.uid, ...snap.data() } as UserProfile
+          : { id: user.uid, displayName: user.displayName || 'User', level: 1, exp: 0, badges: [] }
+        );
       }
     });
   }, []);
 
-  const handleComplete = async (score: number, accuracy: number) => {
-    const feedback = await getAIFeedback(score, accuracy, i18n.language);
-    setLastResult({ score, accuracy, feedback });
-    if (userProfile && selectedChallenge) {
-      await addDoc(collection(db,'submissions'), {
-        userId: userProfile.id,
-        displayName: userProfile.displayName,
-        challengeId: selectedChallenge.id,
-        challengeTitle: selectedChallenge.title,
-        score, accuracy,
-        timestamp: serverTimestamp(),
-      });
-      const newExp = userProfile.exp + 500;
-      await setDoc(doc(db,'users',userProfile.id), { exp:newExp, level:Math.floor(newExp/1000)+1 }, { merge:true });
-    }
-    setSelectedChallenge(null);
+  useEffect(() => {
+    if (!userProfile || activeTab !== 'profile') return;
+    const q = query(collection(db, 'challenges'), where('creatorId', '==', userProfile.id), orderBy('timestamp', 'desc'));
+    return onSnapshot(q, snap => setMyChallenges(snap.docs.map(d => ({ id: d.id, ...d.data() } as ChallengeData))));
+  }, [userProfile, activeTab]);
+
+  // 분석 폴링: App 레벨에서 동작 → 탭 전환과 무관하게 계속 진행
+  useEffect(() => {
+    if (!analysis || analysis.status !== 'analyzing') return;
+    const jobId = analysis.jobId;
+    const poll = setInterval(async () => {
+      try {
+        const res = await fetch(`${API_URL}/status/${jobId}`);
+        const result = await res.json();
+
+        if (result.status === 'done') {
+          clearInterval(poll);
+          setAnalysis(prev => prev && prev.jobId === jobId ? { ...prev, status: 'done', progress: 100, message: '완료!' } : prev);
+          setUserColor(analysis.userColor);
+          try {
+            await addDoc(collection(db, 'challenges'), {
+              title: analysis.title,
+              creatorName: userProfile?.displayName || '익명 댄서',
+              creatorId: userProfile?.id || 'anonymous',
+              jobId,
+              clips: result.clips,
+              difficulty: 'Medium',
+              likeCount: 0,
+              participantCount: 0,
+              timestamp: serverTimestamp(),
+            });
+          } catch (err) { console.warn('Firestore save failed:', err); }
+        } else if (result.status === 'error') {
+          clearInterval(poll);
+          setAnalysis(prev => prev && prev.jobId === jobId ? { ...prev, status: 'error', message: result.message || '알 수 없는 오류' } : prev);
+        } else {
+          setAnalysis(prev => prev && prev.jobId === jobId ? { ...prev, progress: result.progress ?? prev.progress, message: result.message ?? prev.message } : prev);
+        }
+      } catch {
+        // 일시적 네트워크 오류는 무시하고 다음 폴링에서 재시도
+      }
+    }, 1500);
+    return () => clearInterval(poll);
+  }, [analysis?.jobId, analysis?.status]);
+
+  const handleLogin = () => {
+    const handle = loginHandle.trim().replace(/^@/, '');
+    if (!handle) return alert('아이디를 입력해주세요');
+    const profile: UserProfile = { id: handle, displayName: handle, level: 1, exp: 0, badges: [] };
+    localStorage.setItem('doomchit_user', JSON.stringify(profile));
+    setUserProfile(profile);
+    setIsLoggedIn(true);
   };
 
+  if (!isLoggedIn) {
+    return (
+      <div className={`min-h-screen bg-white dark:bg-black text-black dark:text-white flex flex-col items-center justify-center p-6 ${MAIN_FONT}`}>
+        <h1 className={`${LOGO_FONT} text-6xl mb-2 text-[#7C5CFC] dark:text-[#D8D8EC]`}>둠칫</h1>
+        <p className="text-gray-500 mb-12 font-bold tracking-widest">DOOMCHIT</p>
+        <div className="w-full max-w-sm space-y-4">
+          <input
+            type="text"
+            value={loginHandle}
+            onChange={e => setLoginHandle(e.target.value)}
+            onKeyDown={e => { if (e.key === 'Enter') handleLogin(); }}
+            placeholder="@아이디를 입력하세요"
+            className="w-full p-4 rounded-2xl bg-gray-100 dark:bg-gray-900 border-none outline-none focus:ring-2 focus:ring-[#7C5CFC]"
+          />
+          <button onClick={handleLogin} className="w-full bg-[#7C5CFC] text-white p-4 rounded-2xl font-bold flex items-center justify-center gap-2 hover:opacity-90 transition-all">
+            <LogIn size={20} /> 시작하기
+          </button>
+        </div>
+      </div>
+    );
+  }
+
   return (
-    <div className="min-h-screen bg-gray-50 text-gray-900 font-sans">
-      <button onClick={() => i18n.changeLanguage(i18n.language==='ko'?'en':'ko')}
-        className="fixed top-6 right-6 z-50 bg-white/80 backdrop-blur-md border border-gray-200 p-3 rounded-full shadow-lg">
-        <Globe size={20} className="text-gray-600"/>
-      </button>
+    <div className={`min-h-screen bg-white dark:bg-black text-black dark:text-white ${MAIN_FONT}`}>
+      <header className="fixed top-0 left-0 w-full h-16 px-6 flex items-center bg-white/80 dark:bg-black/80 backdrop-blur-md z-[100] border-b border-gray-100 dark:border-gray-900">
+        <h1 className={`${LOGO_FONT} text-3xl text-[#7C5CFC] dark:text-[#D8D8EC]`}>둠칫</h1>
+      </header>
 
-      <main className="max-w-md mx-auto min-h-screen">
-        <AnimatePresence mode="wait">
-          <motion.div key={activeTab} initial={{opacity:0,y:10}} animate={{opacity:1,y:0}} exit={{opacity:0,y:-10}} transition={{duration:0.2}}>
-            {activeTab==='feed' && <FeedView onSelectChallenge={c => { setSelectedChallenge(c); }} />}
-            {activeTab==='upload' && <UploadView userProfile={userProfile} />}
-            {activeTab==='leaderboard' && <LeaderboardView />}
-            {activeTab==='profile' && <ProfileView userProfile={userProfile} />}
-          </motion.div>
-        </AnimatePresence>
+      <main className="pt-16 pb-24 max-w-md mx-auto min-h-screen relative shadow-2xl bg-white dark:bg-black">
+        {!isLearning && !challengeClipUrl && (
+          <div className="pt-4 animate-fade-in">
+            {activeTab === 'feed' && <FeedView onSelectChallenge={c => { setSelectedChallenge(c); setIsLearning(true); }} />}
+            {activeTab === 'upload' && (
+              analysis
+                ? <AnalysisProgressView analysis={analysis} onDismiss={() => setAnalysis(null)} />
+                : <UploadView onStartAnalysis={(data) => setAnalysis({
+                    jobId: data.jobId,
+                    status: 'analyzing',
+                    progress: 0,
+                    message: '선택된 인물의 동작을 집중 분석 중...',
+                    title: data.title,
+                    userColor: data.userColor,
+                  })} />
+            )}
+            
+            {activeTab === 'ranking' && (
+              <div className="p-4 pb-24 space-y-4">
+                <div className="flex justify-between items-center mb-4">
+                  <h2 className="text-2xl font-black">랭킹</h2>
+                  <button onClick={() => setRankingMode(rankingMode === 'overall' ? 'song' : 'overall')} className="text-xs font-bold bg-[#7C5CFC]/10 text-[#7C5CFC] px-3 py-1.5 rounded-full">
+                    {rankingMode === 'overall' ? '개별곡 랭킹 보기' : '전체 랭킹 보기'}
+                  </button>
+                </div>
+                {rankingMode === 'overall' ? (
+                  <div className="space-y-3">
+                    {DUMMY_OVERALL.map((user) => (
+                      <div key={user.id} className="flex items-center gap-4 p-4 bg-gray-50 dark:bg-gray-900 rounded-[1.5rem]">
+                        <div className="flex flex-col items-center w-8">
+                          <span className="text-xl font-black">{user.rank}</span>
+                          <span className="text-[10px] font-bold">{user.diff > 0 ? <span className="text-red-500">▲{user.diff}</span> : user.diff < 0 ? <span className="text-blue-500">▼{Math.abs(user.diff)}</span> : <span className="text-gray-400">-</span>}</span>
+                        </div>
+                        <img src={user.img} className="w-12 h-12 rounded-full border-2 border-transparent hover:border-[#7C5CFC] cursor-pointer" onClick={() => setActiveTab('profile')} />
+                        <div className="flex-1">
+                          <p className="font-bold text-lg">{user.name}</p>
+                          <p className="text-xs text-gray-500">합계 {user.total.toLocaleString()} | 최고 {user.max}점</p>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                ) : (
+                  <div className="space-y-4">
+                    <div className="relative"><Search className="absolute left-4 top-4 text-gray-400" size={18} /><input type="text" placeholder="챌린지 검색" className="w-full p-4 pl-12 rounded-2xl bg-gray-100 dark:bg-gray-900 outline-none focus:ring-2 focus:ring-[#7C5CFC]" /></div>
+                    <div className="p-4 border-l-4 border-[#7C5CFC] bg-gray-50 dark:bg-gray-900 rounded-r-2xl mb-4"><p className="text-xs text-[#7C5CFC] font-bold">인기 곡</p><p className="font-black text-lg">Hype Boy - NewJeans</p></div>
+                  </div>
+                )}
+              </div>
+            )}
 
-        <AnimatePresence>
-          {selectedChallenge && <CameraView challenge={selectedChallenge} onClose={() => setSelectedChallenge(null)} onComplete={handleComplete} />}
-        </AnimatePresence>
-        <AnimatePresence>
-          {lastResult && <ResultModal {...lastResult} onClose={() => setLastResult(null)} />}
-        </AnimatePresence>
+            {activeTab === 'profile' && userProfile && (
+              <div className="p-4 pb-24">
+                <div className="flex items-center gap-6 mb-8 mt-4">
+                  <div className="w-24 h-24 rounded-full bg-gradient-to-tr from-[#7C5CFC] to-[#D8D8EC] p-1">
+                    <div className="w-full h-full rounded-full border-4 border-white dark:border-black bg-gray-200 dark:bg-gray-800 flex items-center justify-center">
+                      <User size={36} className="text-gray-400" />
+                    </div>
+                  </div>
+                  <div>
+                    <h2 className="text-2xl font-black mb-1">{userProfile.displayName}</h2>
+                    <p className="text-[#7C5CFC] font-bold text-sm">@{userProfile.id}</p>
+                    <div className="flex gap-4 mt-3 text-xs font-bold text-gray-500">
+                      <span>게시물 {myChallenges.length}</span>
+                      <span>레벨 {userProfile.level}</span>
+                    </div>
+                  </div>
+                </div>
+                {myChallenges.length === 0 ? (
+                  <div className="flex flex-col items-center justify-center mt-12 gap-4 text-gray-400">
+                    <Upload size={48} strokeWidth={1} />
+                    <p className="font-bold text-center">아직 올린 챌린지가 없어요!<br />첫 챌린지를 만들어보세요 🕺</p>
+                  </div>
+                ) : (
+                  <div className="grid grid-cols-3 gap-1">
+                    {myChallenges.map(c => (
+                      <div
+                        key={c.id}
+                        onClick={() => { setSelectedChallenge(c); setIsLearning(true); }}
+                        className="aspect-square bg-gray-100 dark:bg-gray-900 relative group cursor-pointer overflow-hidden"
+                      >
+                        {c.clips?.[0] && (
+                          <img src={`${API_URL}${c.clips[0].thumb_url}`} className="absolute inset-0 w-full h-full object-cover" alt={c.title} />
+                        )}
+                        <div className="absolute inset-0 bg-black/0 group-hover:bg-black/40 transition-all" />
+                        <Play size={20} className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 text-white opacity-0 group-hover:opacity-100" />
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
+        )}
 
-        <Navbar activeTab={activeTab} setActiveTab={setActiveTab} />
+        {!isLearning && !challengeClipUrl && (
+          <nav className="fixed bottom-0 left-0 right-0 max-w-md mx-auto bg-white/90 dark:bg-black/90 backdrop-blur-xl border-t border-gray-100 dark:border-gray-900 px-4 py-3 flex justify-around z-[100] pb-safe">
+            {[{ id: 'feed', icon: Play, label: '피드' }, { id: 'upload', icon: Plus, label: '올리기' }, { id: 'ranking', icon: Trophy, label: '랭킹' }, { id: 'profile', icon: User, label: '내 정보' }].map(tab => {
+              const isUploadTab = tab.id === 'upload';
+              const isAnalyzing = isUploadTab && analysis?.status === 'analyzing';
+              const isDone = isUploadTab && analysis?.status === 'done';
+              const isError = isUploadTab && analysis?.status === 'error';
+              const isActive = activeTab === tab.id;
+
+              const iconColor = isDone ? 'text-green-500' : isError ? 'text-red-500' : isAnalyzing ? 'text-[#7C5CFC]' : isActive ? 'text-[#7C5CFC] dark:text-[#D8D8EC]' : 'text-gray-400 hover:text-gray-300';
+              const labelText = isAnalyzing ? `분석 ${analysis?.progress ?? 0}%` : isDone ? '완료!' : isError ? '오류' : tab.label;
+              const shouldScale = isActive && !isAnalyzing && !isDone && !isError;
+
+              return (
+                <button key={tab.id} onClick={() => setActiveTab(tab.id)} className={`flex flex-col items-center gap-1 transition-all ${iconColor} ${shouldScale ? 'scale-110' : ''}`}>
+                  {isAnalyzing ? (
+                    <Loader2 size={22} className="animate-spin" />
+                  ) : isDone ? (
+                    <motion.div initial={{ scale: 0 }} animate={{ scale: 1 }} transition={{ type: 'spring', bounce: 0.6 }}>
+                      <CheckCircle size={22} strokeWidth={2.5} />
+                    </motion.div>
+                  ) : (
+                    <tab.icon size={22} strokeWidth={isActive ? 2.5 : 2} />
+                  )}
+                  <span className="text-[10px] font-black">{labelText}</span>
+                </button>
+              );
+            })}
+          </nav>
+        )}
+
+        {isLearning && selectedChallenge && (
+          <div className="fixed inset-0 z-[200] bg-black">
+            <Learn clips={selectedChallenge.clips} jobId={selectedChallenge.jobId} apiUrl={API_URL} onStartChallenge={(url, speed) => { setChallengeClipUrl(url); setChallengeSpeed(speed); setIsLearning(false); }} onBack={() => { setIsLearning(false); setSelectedChallenge(null); }} />
+          </div>
+        )}
+
+        {challengeClipUrl && (
+          <div className="fixed inset-0 z-[200] bg-black">
+            <ChallengeComponent videoUrl={`${API_URL}${challengeClipUrl}`} playbackRate={challengeSpeed} userStickmanColor={userColor} onBack={() => { setChallengeClipUrl(''); setIsLearning(true); }} />
+          </div>
+        )}
       </main>
     </div>
   );

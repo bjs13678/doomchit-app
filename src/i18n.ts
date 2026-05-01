@@ -5,7 +5,7 @@ import LanguageDetector from 'i18next-browser-languagedetector';
 const resources = {
   en: {
     translation: {
-      "app_name": "Jiseob & Junmin",
+      "app_name": "Doomchit",
       "welcome": "Ready for the Challenge?",
       "start_challenge": "Start Challenge",
       "leaderboard": "Leaderboard",
@@ -22,7 +22,7 @@ const resources = {
   },
   ko: {
     translation: {
-      "app_name": "지섭이와 준민이",
+      "app_name": "둠칫",
       "welcome": "챌린지에 도전하시겠어요?",
       "start_challenge": "챌린지 시작",
       "leaderboard": "리더보드",
