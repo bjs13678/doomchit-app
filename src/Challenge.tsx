@@ -3,7 +3,11 @@ import Webcam from 'react-webcam';
 import { Pose, POSE_CONNECTIONS } from '@mediapipe/pose';
 import { Camera } from '@mediapipe/camera_utils';
 import { drawConnectors, drawLandmarks } from '@mediapipe/drawing_utils';
-import { Play, RefreshCw, ArrowLeft, Smartphone, Trophy } from 'lucide-react';
+import { Play, RefreshCw, ArrowLeft, Smartphone, Trophy, User } from 'lucide-react';
+import { collection, onSnapshot, query, where } from 'firebase/firestore';
+import { db } from './firebase';
+
+interface ChallengeRankRow { userId: string; displayName: string; max: number; }
 
 const calculateScore = (targetLandmarks: any, userLandmarks: any) => {
   if (!userLandmarks || userLandmarks.length === 0) return 0;
@@ -42,26 +46,27 @@ const calculateScore = (targetLandmarks: any, userLandmarks: any) => {
 interface Props {
   videoUrl: string;
   playbackRate: number;
-  userStickmanColor?: string; 
+  userStickmanColor?: string;
   challengeTitle?: string;  // 추가: 챌린지 제목
   challengeArtist?: string; // 추가: 가수명 (또는 홈트 등)
+  challengeId?: string;     // 이 챌린지 ID (음악 없는 경우 리더보드 필터)
+  challengeMusicId?: string; // 챌린지의 음악 ID (있으면 곡 단위로 리더보드 집계)
+  currentUserId?: string;   // 본인 강조용
   onBack: () => void;
+  onComplete?: (score: number) => void; // 챌린지 완료 시 점수 콜백
 }
 
-// 💡 완료 화면에 띄울 개별곡 랭킹 더미 데이터
-const DUMMY_SONG_RANKING = [
-  { id: 1, rank: 1, name: "춤신춤왕", maxScore: 99, profilePic: "https://i.pravatar.cc/150?u=a" },
-  { id: 2, rank: 2, name: "둠칫마스터", maxScore: 95, profilePic: "https://i.pravatar.cc/150?u=b" },
-  { id: 3, rank: 3, name: "리듬타는라이언", maxScore: 88, profilePic: "https://i.pravatar.cc/150?u=c" },
-];
-
-export default function ChallengeComponent({ 
-  videoUrl, 
-  playbackRate, 
-  userStickmanColor = "#00FF00", 
-  challengeTitle = "Hype Boy", 
-  challengeArtist = "NewJeans", 
-  onBack 
+export default function ChallengeComponent({
+  videoUrl,
+  playbackRate,
+  userStickmanColor = "#00FF00",
+  challengeTitle = "Hype Boy",
+  challengeArtist = "NewJeans",
+  challengeId,
+  challengeMusicId,
+  currentUserId,
+  onBack,
+  onComplete
 }: Props) {
   const webcamRef = useRef<Webcam>(null);
   const videoRef = useRef<HTMLVideoElement>(null);
@@ -71,6 +76,30 @@ export default function ChallengeComponent({
   const [isPlaying, setIsPlaying] = useState(false);
   const [isFinished, setIsFinished] = useState(false);
   const [finalScore, setFinalScore] = useState(0);
+  const [leaderboard, setLeaderboard] = useState<ChallengeRankRow[]>([]);
+
+  // 리더보드 집계 모드: 음악이 있으면 곡 전체, 없으면 이 챌린지에 한정
+  const leaderboardMode: 'music' | 'challenge' = challengeMusicId ? 'music' : 'challenge';
+
+  useEffect(() => {
+    if (!isFinished) return;
+    if (!challengeMusicId && !challengeId) return;
+    const filter = challengeMusicId
+      ? where('musicId', '==', challengeMusicId)
+      : where('challengeId', '==', challengeId!);
+    const q = query(collection(db, 'submissions'), filter);
+    return onSnapshot(q, snap => {
+      const byUser = new Map<string, ChallengeRankRow>();
+      snap.docs.forEach(d => {
+        const s = d.data() as any;
+        const cur = byUser.get(s.userId) || { userId: s.userId, displayName: s.displayName, max: 0 };
+        if (s.score > cur.max) cur.max = s.score;
+        cur.displayName = s.displayName;
+        byUser.set(s.userId, cur);
+      });
+      setLeaderboard(Array.from(byUser.values()).sort((a, b) => b.max - a.max));
+    });
+  }, [isFinished, challengeId, challengeMusicId]);
   
   const [isPortrait, setIsPortrait] = useState(false);
   const [isMobile, setIsMobile] = useState(false);
@@ -201,10 +230,11 @@ export default function ChallengeComponent({
   const handleVideoEnd = () => {
     setIsPlaying(false);
     setIsFinished(true);
-    const avgScore = scoreDataRef.current.count > 0 
-      ? Math.round(scoreDataRef.current.sum / scoreDataRef.current.count) 
+    const avgScore = scoreDataRef.current.count > 0
+      ? Math.round(scoreDataRef.current.sum / scoreDataRef.current.count)
       : 0;
     setFinalScore(avgScore);
+    onComplete?.(avgScore);
   };
 
   return (
@@ -278,34 +308,89 @@ export default function ChallengeComponent({
             </button>
           </div>
 
-          {/* 현재 곡의 랭킹 표시 영역 */}
+          {/* 현재 챌린지/곡의 랭킹 표시 영역 (실데이터) */}
           <div className="w-full max-w-md bg-white/5 rounded-[2rem] p-6 border border-white/10 mb-8">
             <div className="flex items-center gap-2 mb-4">
               <Trophy className="text-yellow-400" size={24} />
-              <h3 className="text-xl font-black text-white">이 챌린지의 랭킹</h3>
-            </div>
-            
-            <div className="p-4 border-l-4 border-[#7C5CFC] bg-white/5 rounded-r-2xl mb-4">
-              <p className="text-xs text-[#7C5CFC] font-bold">현재 진행한 곡</p>
-              <p className="font-black text-lg text-white">{challengeTitle} - {challengeArtist}</p>
+              <h3 className="text-xl font-black text-white">
+                {leaderboardMode === 'music' ? '이 곡의 랭킹' : '이 챌린지의 랭킹'}
+              </h3>
             </div>
 
-            <div className="space-y-3">
-              {DUMMY_SONG_RANKING.map((user) => (
-                <div key={user.id} className="flex items-center gap-4 p-4 bg-white/5 rounded-2xl">
-                  <div className="flex flex-col items-center w-6">
-                    <span className={`text-xl font-black ${user.rank === 1 ? 'text-yellow-400' : user.rank === 2 ? 'text-gray-300' : user.rank === 3 ? 'text-amber-600' : 'text-white'}`}>
-                      {user.rank}
-                    </span>
-                  </div>
-                  <img src={user.profilePic} className="w-12 h-12 rounded-full border border-white/20" alt="profile" />
-                  <div className="flex-1">
-                    <p className="font-bold text-lg text-white">{user.name}</p>
-                    <p className="text-xs text-[#7C5CFC] font-bold">최고 점수 {user.maxScore}점</p>
-                  </div>
-                </div>
-              ))}
+            <div className="p-4 border-l-4 border-[#7C5CFC] bg-white/5 rounded-r-2xl mb-5">
+              <p className="text-xs text-[#7C5CFC] font-bold">
+                {leaderboardMode === 'music' ? '현재 곡 (모든 챌린지 통합)' : '현재 챌린지 (이 영상만)'}
+              </p>
+              <p className="font-black text-lg text-white">{challengeTitle}{challengeArtist ? ` — ${challengeArtist}` : ''}</p>
             </div>
+
+            {(() => {
+              const myRank = currentUserId ? leaderboard.findIndex(r => r.userId === currentUserId) + 1 : 0;
+              const myRow = currentUserId ? leaderboard.find(r => r.userId === currentUserId) : null;
+              const top5 = leaderboard.slice(0, 5);
+              const myInTop = myRank > 0 && myRank <= 5;
+
+              if (leaderboard.length === 0) {
+                return (
+                  <div className="flex flex-col items-center justify-center py-8 gap-3 text-white/40">
+                    <Trophy size={36} strokeWidth={1.2} />
+                    <p className="font-bold text-center text-sm">집계 중...<br />당신이 첫 도전자가 될 수도 있어요!</p>
+                  </div>
+                );
+              }
+
+              return (
+                <>
+                  {/* 본인 순위 — 상단 강조 (TOP 5 안에 있어도 별도 표시) */}
+                  {myRow && (
+                    <div className="mb-4 p-4 bg-[#7C5CFC]/20 border-2 border-[#7C5CFC] rounded-2xl">
+                      <p className="text-xs text-[#7C5CFC] font-black tracking-widest mb-2">YOUR RANK</p>
+                      <div className="flex items-center gap-3">
+                        <div className="w-10 h-10 rounded-full bg-[#7C5CFC] flex items-center justify-center font-black text-white text-lg">
+                          {myRank}
+                        </div>
+                        <div className="flex-1 min-w-0">
+                          <p className="font-bold text-white truncate">{myRow.displayName} <span className="text-xs text-[#D8D8EC]">(나)</span></p>
+                          <p className="text-xs text-white/70 font-bold">최고 {myRow.max}점 · 전체 {leaderboard.length}명 중 {myRank}위</p>
+                        </div>
+                      </div>
+                    </div>
+                  )}
+
+                  {/* TOP 5 */}
+                  <div className="space-y-2">
+                    {top5.map((row, i) => {
+                      const rank = i + 1;
+                      const isMe = row.userId === currentUserId;
+                      const medal = rank === 1 ? '🥇' : rank === 2 ? '🥈' : rank === 3 ? '🥉' : null;
+                      const rankColor = rank === 1 ? 'text-yellow-400' : rank === 2 ? 'text-gray-300' : rank === 3 ? 'text-amber-500' : 'text-white/70';
+                      return (
+                        <div key={row.userId} className={`flex items-center gap-3 p-3 rounded-2xl ${isMe ? 'bg-[#7C5CFC]/15 border border-[#7C5CFC]/40' : 'bg-white/5'}`}>
+                          <div className="flex items-center justify-center w-9">
+                            {medal ? <span className="text-2xl">{medal}</span> : <span className={`text-lg font-black ${rankColor}`}>{rank}</span>}
+                          </div>
+                          <div className={`w-10 h-10 rounded-full flex items-center justify-center font-black text-white ${isMe ? 'bg-[#7C5CFC]' : 'bg-gradient-to-br from-gray-500 to-gray-600'}`}>
+                            {row.displayName.charAt(0).toUpperCase()}
+                          </div>
+                          <div className="flex-1 min-w-0">
+                            <p className={`font-bold truncate ${isMe ? 'text-[#D8D8EC]' : 'text-white'}`}>
+                              {row.displayName}{isMe && <span className="text-xs ml-1">(나)</span>}
+                            </p>
+                            <p className="text-xs text-white/50 font-bold">최고 {row.max}점</p>
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+
+                  {leaderboard.length > 5 && !myInTop && (
+                    <p className="text-center text-xs text-white/40 mt-3 font-bold">
+                      ⋯ 외 {leaderboard.length - 5}명
+                    </p>
+                  )}
+                </>
+              );
+            })()}
           </div>
         </div>
       )}

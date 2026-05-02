@@ -38,11 +38,9 @@ service cloud.firestore {
     // Rules
     // ===============================================================
 
+    // MVP: 모두 열림 (중복 아이디 체크용 read + 가입용 create 필요)
     match /users/{userId} {
-      allow read: if isAuthenticated();
-      allow create: if isOwner(userId) && isValidUser(request.resource.data);
-      allow update: if isOwner(userId) && isValidUser(request.resource.data) && 
-                    request.resource.data.diff(resource.data).affectedKeys().hasOnly(['displayName', 'level', 'exp', 'badges']);
+      allow read, create, update: if true;
     }
 
     match /challenges/{challengeId} {
@@ -51,9 +49,11 @@ service cloud.firestore {
       allow update: if true;
     }
 
+    // MVP: 인증 없이 열어둠. 프로덕션 전 반드시 isAuthenticated() + isValidSubmission()로 복원
     match /submissions/{submissionId} {
-      allow read: if isAuthenticated();
-      allow create: if isAuthenticated() && isValidSubmission(request.resource.data);
+      allow read: if true;
+      allow create: if true;
+      allow delete: if true;
     }
   }
 }

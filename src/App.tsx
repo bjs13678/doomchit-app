@@ -1,14 +1,17 @@
 import { useState, useEffect, useRef } from 'react'; import { motion, 
 AnimatePresence } from 'motion/react'; import { Trophy, User, Play, Plus,
 Upload, Loader2, CheckCircle, Palette, UserCheck, Search, ChevronUp,
-ChevronDown, Minus, LogIn, Settings, LogOut, X } from 'lucide-react'; import { doc, getDoc,
-collection, addDoc, serverTimestamp, onSnapshot, query, orderBy, limit, where }
+ChevronDown, Minus, LogIn, Settings, LogOut, X } from 'lucide-react'; import { doc, getDoc, setDoc,
+collection, addDoc, serverTimestamp, onSnapshot, query, orderBy, limit, where, getDocs, deleteDoc }
 from 'firebase/firestore'; import { onAuthStateChanged } from 
-'firebase/auth'; import { db, auth } from './firebase'; import 
+'firebase/auth'; import {
+createUserWithEmailAndPassword, signInWithEmailAndPassword, signOut, updateProfile,
+GoogleAuthProvider, signInWithPopup
+} from 'firebase/auth'; import { db, auth } from './firebase'; import 
 './index.css'; import './i18n'; import Learn from './Learn'; import 
 ChallengeComponent from './Challenge';
 
-const API_URL = 'http://localhost:8000';
+const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:8000';
 
 // --- [디자인 폰트 설정] ---
 const LOGO_FONT = "font-['Black_Han_Sans']";
@@ -411,11 +414,177 @@ const FeedView = ({ onSelectChallenge }: { onSelectChallenge: (c: ChallengeData)
   );
 };
 
+// ── 랭킹 화면 (실시간 submissions 집계 + 전체/곡별 모드) ──────────────────────────
+interface UserAgg {
+  userId: string;
+  displayName: string;
+  total: number;
+  max: number;
+  count: number;
+}
+interface Submission {
+  id: string;
+  userId: string;
+  displayName: string;
+  challengeId: string;
+  challengeTitle: string;
+  musicId: string | null;
+  musicTitle: string | null;
+  musicArtist: string | null;
+  musicAlbumArt: string | null;
+  score: number;
+  timestamp: any;
+}
+
+const PodiumCard = ({ rank, agg, isMe, mode }: { rank: number; agg: UserAgg; isMe: boolean; mode: 'overall' | 'song' }) => {
+  const heights = { 1: 'h-32', 2: 'h-24', 3: 'h-20' } as const;
+  const colors = { 1: 'from-yellow-400 to-yellow-300', 2: 'from-gray-300 to-gray-200', 3: 'from-orange-400 to-orange-300' } as const;
+  const medals = { 1: '🥇', 2: '🥈', 3: '🥉' } as const;
+  return (
+    <motion.div
+      initial={{ opacity: 0, y: 30 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: rank * 0.1 }}
+      className="flex flex-col items-center gap-2 flex-1"
+    >
+      <div className="text-4xl">{medals[rank as 1|2|3]}</div>
+      <div className={`w-14 h-14 rounded-full bg-gradient-to-br ${colors[rank as 1|2|3]} flex items-center justify-center text-2xl font-black text-white shadow-lg ${isMe ? 'ring-4 ring-[#7C5CFC]' : ''}`}>
+        {agg.displayName.charAt(0).toUpperCase()}
+      </div>
+      <p className={`font-black text-sm truncate max-w-[80px] ${isMe ? 'text-[#7C5CFC]' : ''}`}>{agg.displayName}</p>
+      <div className={`w-full ${heights[rank as 1|2|3]} bg-gradient-to-t ${colors[rank as 1|2|3]} rounded-t-2xl flex items-start justify-center pt-3`}>
+        <span className="text-2xl font-black text-white drop-shadow">{mode === 'overall' ? agg.total.toLocaleString() : agg.max}</span>
+      </div>
+    </motion.div>
+  );
+};
+
+const RankingView = ({ userProfile }: { userProfile: UserProfile | null }) => {
+  const [mode, setMode] = useState<'overall' | 'song'>('overall');
+  const [submissions, setSubmissions] = useState<Submission[]>([]);
+  const [filterTrack, setFilterTrack] = useState<Track | null>(null);
+
+  useEffect(() => {
+    const q = query(collection(db, 'submissions'), orderBy('timestamp', 'desc'), limit(500));
+    return onSnapshot(q, snap => setSubmissions(snap.docs.map(d => ({ id: d.id, ...d.data() } as Submission))));
+  }, []);
+
+  const aggregated: UserAgg[] = (() => {
+    const filtered = mode === 'song' && filterTrack
+      ? submissions.filter(s => s.musicId === filterTrack.id)
+      : submissions;
+    const byUser = new Map<string, UserAgg>();
+    for (const s of filtered) {
+      const cur = byUser.get(s.userId) || { userId: s.userId, displayName: s.displayName, total: 0, max: 0, count: 0 };
+      cur.total += s.score;
+      cur.max = Math.max(cur.max, s.score);
+      cur.count += 1;
+      cur.displayName = s.displayName; // 최신 displayName 유지
+      byUser.set(s.userId, cur);
+    }
+    const sortKey = mode === 'overall' ? 'total' : 'max';
+    return Array.from(byUser.values()).sort((a, b) => b[sortKey] - a[sortKey]);
+  })();
+
+  const top3 = aggregated.slice(0, 3);
+  const rest = aggregated.slice(3, 50);
+  const myRank = userProfile ? aggregated.findIndex(a => a.userId === userProfile.id) + 1 : 0;
+  const myAgg = userProfile ? aggregated.find(a => a.userId === userProfile.id) : null;
+  const showMyRow = myAgg && myRank > 3;
+
+  return (
+    <div className="p-4 pb-24 space-y-4">
+      <div className="flex justify-between items-center">
+        <h2 className="text-2xl font-black flex items-center gap-2">
+          <Trophy className="text-yellow-400" size={26} /> 랭킹
+        </h2>
+        <div className="flex gap-1 bg-gray-100 dark:bg-gray-900 p-1 rounded-full">
+          <button onClick={() => setMode('overall')} className={`text-xs font-black px-4 py-2 rounded-full transition-all ${mode === 'overall' ? 'bg-[#7C5CFC] text-white' : 'text-gray-500'}`}>전체</button>
+          <button onClick={() => setMode('song')} className={`text-xs font-black px-4 py-2 rounded-full transition-all ${mode === 'song' ? 'bg-[#7C5CFC] text-white' : 'text-gray-500'}`}>곡별</button>
+        </div>
+      </div>
+
+      {mode === 'song' && (
+        <div className="space-y-2">
+          <p className="text-xs font-bold text-gray-400 px-1">🎵 곡 선택</p>
+          <MusicSearch selected={filterTrack} onSelect={setFilterTrack} onClear={() => setFilterTrack(null)} />
+        </div>
+      )}
+
+      {mode === 'song' && !filterTrack ? (
+        <div className="flex flex-col items-center justify-center mt-20 gap-3 text-gray-400">
+          <Search size={40} strokeWidth={1.5} />
+          <p className="font-bold text-center">곡을 검색해서<br />그 곡의 랭킹을 확인하세요</p>
+        </div>
+      ) : aggregated.length === 0 ? (
+        <div className="flex flex-col items-center justify-center mt-20 gap-3 text-gray-400">
+          <Trophy size={48} strokeWidth={1} />
+          <p className="font-bold text-center">아직 도전 기록이 없어요!<br />첫 번째 챌린지를 도전해보세요 🕺</p>
+        </div>
+      ) : (
+        <>
+          {/* Top 3 Podium */}
+          {top3.length > 0 && (
+            <div className="bg-gradient-to-b from-[#7C5CFC]/10 to-transparent rounded-3xl p-5 pt-6">
+              <div className="flex items-end justify-around gap-2">
+                {top3[1] && <PodiumCard rank={2} agg={top3[1]} isMe={top3[1].userId === userProfile?.id} mode={mode} />}
+                {top3[0] && <PodiumCard rank={1} agg={top3[0]} isMe={top3[0].userId === userProfile?.id} mode={mode} />}
+                {top3[2] && <PodiumCard rank={3} agg={top3[2]} isMe={top3[2].userId === userProfile?.id} mode={mode} />}
+              </div>
+            </div>
+          )}
+
+          {/* 4위~ 리스트 */}
+          {rest.length > 0 && (
+            <div className="space-y-2">
+              {rest.map((agg, i) => {
+                const rank = i + 4;
+                const isMe = agg.userId === userProfile?.id;
+                return (
+                  <motion.div
+                    key={agg.userId}
+                    initial={{ opacity: 0, x: -10 }} animate={{ opacity: 1, x: 0 }} transition={{ delay: i * 0.03 }}
+                    className={`flex items-center gap-4 p-3 rounded-2xl ${isMe ? 'bg-[#7C5CFC]/10 border-2 border-[#7C5CFC]' : 'bg-gray-50 dark:bg-gray-900'}`}
+                  >
+                    <div className="w-8 text-center">
+                      <span className={`text-lg font-black ${isMe ? 'text-[#7C5CFC]' : 'text-gray-500'}`}>{rank}</span>
+                    </div>
+                    <div className={`w-10 h-10 rounded-full ${isMe ? 'bg-[#7C5CFC]' : 'bg-gradient-to-br from-gray-400 to-gray-300'} flex items-center justify-center font-black text-white`}>
+                      {agg.displayName.charAt(0).toUpperCase()}
+                    </div>
+                    <div className="flex-1 min-w-0">
+                      <p className={`font-bold truncate ${isMe ? 'text-[#7C5CFC]' : ''}`}>{agg.displayName} {isMe && <span className="text-xs">(나)</span>}</p>
+                      <p className="text-xs text-gray-500">{mode === 'overall' ? `합계 ${agg.total.toLocaleString()}점 · ${agg.count}회` : `최고 ${agg.max}점`}</p>
+                    </div>
+                  </motion.div>
+                );
+              })}
+            </div>
+          )}
+
+          {/* 본인이 50위 밖이거나 4위 이하인데 안 보이면 별도 카드 */}
+          {showMyRow && myAgg && myRank > 50 && (
+            <div className="sticky bottom-20 mt-4">
+              <div className="flex items-center gap-4 p-3 rounded-2xl bg-[#7C5CFC]/10 border-2 border-[#7C5CFC] shadow-lg">
+                <div className="w-8 text-center"><span className="text-lg font-black text-[#7C5CFC]">{myRank}</span></div>
+                <div className="w-10 h-10 rounded-full bg-[#7C5CFC] flex items-center justify-center font-black text-white">
+                  {myAgg.displayName.charAt(0).toUpperCase()}
+                </div>
+                <div className="flex-1 min-w-0">
+                  <p className="font-bold text-[#7C5CFC]">나 ({myAgg.displayName})</p>
+                  <p className="text-xs text-gray-500">{mode === 'overall' ? `합계 ${myAgg.total.toLocaleString()}점` : `최고 ${myAgg.max}점`}</p>
+                </div>
+              </div>
+            </div>
+          )}
+        </>
+      )}
+    </div>
+  );
+};
+
 // ── 메인 App ──────────────────────────────────────────
 export default function App() {
   const [isLoggedIn, setIsLoggedIn] = useState(false);
   const [activeTab, setActiveTab] = useState('feed');
-  const [rankingMode, setRankingMode] = useState<'overall' | 'song'>('overall');
 
   const [selectedChallenge, setSelectedChallenge] = useState<ChallengeData | null>(null);
   const [isLearning, setIsLearning] = useState(false);
@@ -427,40 +596,138 @@ export default function App() {
   const [myChallenges, setMyChallenges] = useState<ChallengeData[]>([]);
   const [analysis, setAnalysis] = useState<AnalysisState | null>(null);
   const [showSettings, setShowSettings] = useState(false);
+  const [seedBusy, setSeedBusy] = useState<'idle' | 'adding' | 'removing'>('idle');
 
-  const handleLogout = () => {
+  const SEED_USERS = [
+    { id: 'seed_dancing_queen', displayName: '댄싱퀸' },
+    { id: 'seed_doomchit_master', displayName: '둠칫마스터' },
+    { id: 'seed_rhythm_lion', displayName: '리듬타는라이언' },
+    { id: 'seed_challenge_king', displayName: '챌린지킹' },
+    { id: 'seed_dance_god', displayName: '춤신춤왕' },
+    { id: 'seed_kpop_lover', displayName: 'K팝러버' },
+  ];
+  const SEED_SONG_QUERIES = [
+    'newjeans hype boy', 'aespa supernova', 'ive love dive',
+    'lesserafim antifragile', 'newjeans super shy', 'illit magnetic',
+  ];
+
+  const handleSeedAdd = async () => {
+    setSeedBusy('adding');
+    try {
+      // 1) iTunes에서 실곡 메타 조회
+      const tracks: Track[] = [];
+      for (const q of SEED_SONG_QUERIES) {
+        try {
+          const res = await fetch(`https://itunes.apple.com/search?term=${encodeURIComponent(q)}&entity=song&limit=1&country=KR`);
+          const data = await res.json();
+          const t = data.results?.[0];
+          if (t) tracks.push({
+            id: String(t.trackId),
+            title: t.trackName,
+            artist: t.artistName,
+            albumArt: t.artworkUrl100 ?? null,
+            previewUrl: t.previewUrl ?? null,
+          });
+        } catch {}
+      }
+      if (tracks.length === 0) { alert('iTunes 곡 조회 실패'); setSeedBusy('idle'); return; }
+
+      // 2) 가짜 사용자별로 3~6회 submission 생성
+      let count = 0;
+      for (const user of SEED_USERS) {
+        const numSubs = 3 + Math.floor(Math.random() * 4);
+        for (let i = 0; i < numSubs; i++) {
+          const track = tracks[Math.floor(Math.random() * tracks.length)];
+          const score = 50 + Math.floor(Math.random() * 50);
+          await addDoc(collection(db, 'submissions'), {
+            userId: user.id,
+            displayName: user.displayName,
+            challengeId: `seed_challenge_${track.id}`,
+            challengeTitle: `${track.title} 챌린지`,
+            musicId: track.id,
+            musicTitle: track.title,
+            musicArtist: track.artist,
+            musicAlbumArt: track.albumArt,
+            score,
+            isSeed: true,
+            timestamp: serverTimestamp(),
+          });
+          count++;
+        }
+      }
+      alert(`✅ 테스트 데이터 ${count}개 추가 완료`);
+    } catch (err) {
+      alert('테스트 데이터 추가 실패: ' + err);
+    } finally {
+      setSeedBusy('idle');
+    }
+  };
+
+  const handleSeedRemove = async () => {
+    if (!confirm('테스트 데이터를 모두 삭제할까요?')) return;
+    setSeedBusy('removing');
+    try {
+      const snap = await getDocs(query(collection(db, 'submissions'), where('isSeed', '==', true)));
+      let count = 0;
+      for (const d of snap.docs) {
+        await deleteDoc(d.ref);
+        count++;
+      }
+      alert(`🗑️ 테스트 데이터 ${count}개 삭제 완료`);
+    } catch (err) {
+      alert('삭제 실패: ' + err);
+    } finally {
+      setSeedBusy('idle');
+    }
+  };
+
+  const handleLogout = async () => {
     if (!confirm('로그아웃 하시겠어요?')) return;
-    localStorage.removeItem('doomchit_user');
-    setUserProfile(null);
-    setIsLoggedIn(false);
-    setLoginHandle('');
+    try { await signOut(auth); } catch {}
     setMyChallenges([]);
     setShowSettings(false);
     setActiveTab('feed');
+    setLoginHandle('');
+    setLoginPassword('');
   };
 
-  // 더미 데이터 (추후 파이어베이스로 교체)
-  const DUMMY_OVERALL = [
-    { id: 1, rank: 1, diff: 0, name: "댄싱퀸", total: 45200, max: 99, img: "https://i.pravatar.cc/100?u=1" },
-    { id: 2, rank: 2, diff: 1, name: "둠칫마스터", total: 42100, max: 98, img: "https://i.pravatar.cc/100?u=2" },
-    { id: 3, rank: 3, diff: -1, name: "루키댄서", total: 38000, max: 95, img: "https://i.pravatar.cc/100?u=3" },
-  ];
-
+  // Firebase Auth state → uid로 users 도큐 조회 → userProfile 세팅
+  // Firestore에 도큐 없으면 needsUsername=true (Google 신규 가입자 등)
   useEffect(() => {
-    const saved = localStorage.getItem('doomchit_user');
-    if (saved) {
-      try {
-        setUserProfile(JSON.parse(saved));
-        setIsLoggedIn(true);
-      } catch {}
-    }
     return onAuthStateChanged(auth, async (user) => {
-      if (user) {
-        const snap = await getDoc(doc(db, 'users', user.uid));
-        setUserProfile(snap.exists()
-          ? { id: user.uid, ...snap.data() } as UserProfile
-          : { id: user.uid, displayName: user.displayName || 'User', level: 1, exp: 0, badges: [] }
-        );
+      if (!user) {
+        setUserProfile(null);
+        setIsLoggedIn(false);
+        setNeedsUsername(false);
+        return;
+      }
+      try {
+        const q = query(collection(db, 'users'), where('uid', '==', user.uid), limit(1));
+        const snap = await getDocs(q);
+        if (!snap.empty) {
+          const d = snap.docs[0];
+          const data: any = d.data();
+          setUserProfile({
+            id: d.id,
+            displayName: data.displayName || d.id,
+            level: data.level ?? 1,
+            exp: data.exp ?? 0,
+            badges: data.badges ?? [],
+          });
+          setIsLoggedIn(true);
+          setNeedsUsername(false);
+        } else {
+          // 인증 OK, Firestore 도큐 없음 → username 선택 필요 (Google 신규)
+          const seed = (user.email?.split('@')[0] || user.displayName || '')
+            .toLowerCase()
+            .replace(/[^a-z0-9_]/g, '_')
+            .slice(0, 20);
+          setUsernamePickerHandle(seed);
+          setNeedsUsername(true);
+          setIsLoggedIn(false);
+        }
+      } catch (err) {
+        console.warn('failed to load profile', err);
       }
     });
   }, []);
@@ -511,32 +778,252 @@ export default function App() {
     return () => clearInterval(poll);
   }, [analysis?.jobId, analysis?.status]);
 
-  const handleLogin = () => {
-    const handle = loginHandle.trim().replace(/^@/, '');
-    if (!handle) return alert('아이디를 입력해주세요');
-    const profile: UserProfile = { id: handle, displayName: handle, level: 1, exp: 0, badges: [] };
-    localStorage.setItem('doomchit_user', JSON.stringify(profile));
-    setUserProfile(profile);
-    setIsLoggedIn(true);
+  const [loginBusy, setLoginBusy] = useState(false);
+  const [loginError, setLoginError] = useState('');
+  const [loginPassword, setLoginPassword] = useState('');
+  const [authMode, setAuthMode] = useState<'login' | 'signup'>('login');
+  const [needsUsername, setNeedsUsername] = useState(false);
+  const [usernamePickerHandle, setUsernamePickerHandle] = useState('');
+  const [usernamePickerError, setUsernamePickerError] = useState('');
+  const [usernamePickerBusy, setUsernamePickerBusy] = useState(false);
+
+  const FAKE_EMAIL_DOMAIN = '@doomchit.local';
+
+  const handleGoogleLogin = async () => {
+    setLoginBusy(true);
+    setLoginError('');
+    try {
+      const provider = new GoogleAuthProvider();
+      await signInWithPopup(auth, provider);
+      // onAuthStateChanged 가 처리. 신규면 username 픽커 화면으로 진입
+    } catch (err: any) {
+      const code = err?.code || '';
+      if (code === 'auth/popup-closed-by-user' || code === 'auth/cancelled-popup-request') {
+        // 사용자가 닫음 — 무시
+      } else if (code === 'auth/popup-blocked') {
+        setLoginError('팝업이 차단되었어요. 브라우저 설정을 확인해주세요');
+      } else {
+        setLoginError('Google 로그인 실패: ' + (err?.message || code));
+      }
+    } finally {
+      setLoginBusy(false);
+    }
   };
+
+  const handleUsernamePick = async () => {
+    const handle = usernamePickerHandle.trim().replace(/^@/, '').toLowerCase();
+    if (!/^[a-zA-Z0-9_]{2,20}$/.test(handle)) {
+      setUsernamePickerError('2~20자 / 영문·숫자·_ 만 가능해요');
+      return;
+    }
+    const user = auth.currentUser;
+    if (!user) { setUsernamePickerError('인증이 만료되었어요. 다시 로그인해주세요'); return; }
+
+    setUsernamePickerBusy(true);
+    setUsernamePickerError('');
+    try {
+      const ref = doc(db, 'users', handle);
+      const existing = await getDoc(ref);
+      if (existing.exists()) {
+        setUsernamePickerError('이미 사용 중인 아이디예요');
+        setUsernamePickerBusy(false);
+        return;
+      }
+      await setDoc(ref, {
+        uid: user.uid,
+        displayName: handle,
+        level: 1, exp: 0, badges: [],
+        createdAt: serverTimestamp(),
+      });
+      try { await updateProfile(user, { displayName: handle }); } catch {}
+      // 즉시 프로필 세팅 (onAuthStateChanged가 다시 안 도니까)
+      setUserProfile({ id: handle, displayName: handle, level: 1, exp: 0, badges: [] });
+      setIsLoggedIn(true);
+      setNeedsUsername(false);
+    } catch (err) {
+      setUsernamePickerError('저장 실패: ' + err);
+    } finally {
+      setUsernamePickerBusy(false);
+    }
+  };
+
+  const handleAuth = async () => {
+    const handle = loginHandle.trim().replace(/^@/, '');
+    const password = loginPassword;
+
+    if (!handle) { setLoginError('아이디를 입력해주세요'); return; }
+    if (!/^[a-zA-Z0-9_]{2,20}$/.test(handle)) {
+      setLoginError('2~20자 / 영문·숫자·_ 만 가능해요');
+      return;
+    }
+    if (!password || password.length < 6) {
+      setLoginError('비밀번호는 6자 이상이어야 해요');
+      return;
+    }
+
+    const email = `${handle.toLowerCase()}${FAKE_EMAIL_DOMAIN}`;
+    setLoginBusy(true);
+    setLoginError('');
+    try {
+      if (authMode === 'signup') {
+        // 1) 아이디 중복 체크
+        const existing = await getDoc(doc(db, 'users', handle));
+        if (existing.exists()) {
+          setLoginError('이미 사용 중인 아이디예요');
+          setLoginBusy(false);
+          return;
+        }
+        // 2) Firebase Auth 가입
+        const cred = await createUserWithEmailAndPassword(auth, email, password);
+        await updateProfile(cred.user, { displayName: handle });
+        // 3) Firestore users 도큐 생성
+        await setDoc(doc(db, 'users', handle), {
+          uid: cred.user.uid,
+          displayName: handle,
+          level: 1, exp: 0, badges: [],
+          createdAt: serverTimestamp(),
+        });
+        // onAuthStateChanged가 displayName으로 프로필 로드
+      } else {
+        await signInWithEmailAndPassword(auth, email, password);
+        // onAuthStateChanged 가 처리
+      }
+    } catch (err: any) {
+      const code = err?.code || '';
+      if (code === 'auth/email-already-in-use') setLoginError('이미 사용 중인 아이디예요');
+      else if (code === 'auth/wrong-password' || code === 'auth/invalid-credential') setLoginError('비밀번호가 틀렸어요');
+      else if (code === 'auth/user-not-found') setLoginError('존재하지 않는 아이디예요');
+      else if (code === 'auth/too-many-requests') setLoginError('잠시 후 다시 시도해주세요');
+      else if (code === 'auth/network-request-failed') setLoginError('네트워크를 확인해주세요');
+      else setLoginError('오류: ' + (err?.message || code || '알 수 없음'));
+      console.warn('auth error', err);
+    } finally {
+      setLoginBusy(false);
+    }
+  };
+
+  // Google 로그인 후 username 미설정 → 픽커 화면
+  if (needsUsername) {
+    return (
+      <div className={`min-h-screen bg-white dark:bg-black text-black dark:text-white flex flex-col items-center justify-center p-6 ${MAIN_FONT}`}>
+        <h1 className={`${LOGO_FONT} text-5xl mb-2 text-[#7C5CFC] dark:text-[#D8D8EC]`}>둠칫</h1>
+        <p className="text-gray-500 mb-2 font-bold tracking-widest">WELCOME</p>
+        <h2 className="text-2xl font-black mb-2 mt-6">사용할 닉네임을 골라주세요</h2>
+        <p className="text-sm text-gray-500 font-bold mb-8 text-center">다른 사용자에게 <span className="text-[#7C5CFC]">@닉네임</span> 으로 표시돼요.<br />한 번 정하면 나중에 못 바꿀 수도 있어요!</p>
+        <div className="w-full max-w-sm space-y-3">
+          <div className="relative">
+            <span className="absolute left-5 top-1/2 -translate-y-1/2 text-gray-400 dark:text-gray-500 font-black text-xl pointer-events-none select-none">@</span>
+            <input
+              type="text"
+              value={usernamePickerHandle}
+              onChange={e => { setUsernamePickerHandle(e.target.value.replace(/^@/, '').toLowerCase()); if (usernamePickerError) setUsernamePickerError(''); }}
+              onKeyDown={e => { if (e.key === 'Enter' && !usernamePickerBusy) handleUsernamePick(); }}
+              placeholder="닉네임"
+              disabled={usernamePickerBusy}
+              className={`w-full p-4 pl-12 rounded-2xl bg-gray-100 dark:bg-gray-900 border-2 outline-none focus:ring-2 transition-all ${usernamePickerError ? 'border-red-500 focus:ring-red-500/30' : 'border-transparent focus:ring-[#7C5CFC]'} disabled:opacity-50`}
+              autoFocus
+            />
+          </div>
+          {usernamePickerError && <p className="text-xs font-bold text-red-500 px-2">{usernamePickerError}</p>}
+          <button
+            onClick={handleUsernamePick}
+            disabled={usernamePickerBusy || !usernamePickerHandle.trim()}
+            className="w-full bg-[#7C5CFC] text-white p-4 rounded-2xl font-bold flex items-center justify-center gap-2 hover:opacity-90 transition-all disabled:opacity-50"
+          >
+            {usernamePickerBusy ? <><Loader2 size={20} className="animate-spin" /> 확인 중...</> : <><CheckCircle size={20} /> 둠칫 시작하기</>}
+          </button>
+          <button
+            onClick={async () => { await signOut(auth); }}
+            className="w-full text-sm text-gray-400 hover:text-gray-600 font-bold pt-3"
+          >
+            취소하고 다른 계정으로 로그인
+          </button>
+        </div>
+      </div>
+    );
+  }
 
   if (!isLoggedIn) {
     return (
       <div className={`min-h-screen bg-white dark:bg-black text-black dark:text-white flex flex-col items-center justify-center p-6 ${MAIN_FONT}`}>
         <h1 className={`${LOGO_FONT} text-6xl mb-2 text-[#7C5CFC] dark:text-[#D8D8EC]`}>둠칫</h1>
         <p className="text-gray-500 mb-12 font-bold tracking-widest">DOOMCHIT</p>
-        <div className="w-full max-w-sm space-y-4">
+        <div className="w-full max-w-sm space-y-3">
+          {/* 아이디 */}
           <input
             type="text"
             value={loginHandle}
-            onChange={e => setLoginHandle(e.target.value)}
-            onKeyDown={e => { if (e.key === 'Enter') handleLogin(); }}
-            placeholder="@아이디를 입력하세요"
-            className="w-full p-4 rounded-2xl bg-gray-100 dark:bg-gray-900 border-none outline-none focus:ring-2 focus:ring-[#7C5CFC]"
+            onChange={e => { setLoginHandle(e.target.value.replace(/^@/, '').toLowerCase()); if (loginError) setLoginError(''); }}
+            onKeyDown={e => { if (e.key === 'Enter' && !loginBusy) handleAuth(); }}
+            placeholder="아이디"
+            disabled={loginBusy}
+            className={`w-full p-4 rounded-2xl bg-gray-100 dark:bg-gray-900 border-2 outline-none focus:ring-2 transition-all ${loginError ? 'border-red-500 focus:ring-red-500/30' : 'border-transparent focus:ring-[#7C5CFC]'} disabled:opacity-50`}
+            autoComplete="username"
+            autoCapitalize="off"
+            autoCorrect="off"
           />
-          <button onClick={handleLogin} className="w-full bg-[#7C5CFC] text-white p-4 rounded-2xl font-bold flex items-center justify-center gap-2 hover:opacity-90 transition-all">
-            <LogIn size={20} /> 시작하기
+
+          {/* 비밀번호 */}
+          <input
+            type="password"
+            value={loginPassword}
+            onChange={e => { setLoginPassword(e.target.value); if (loginError) setLoginError(''); }}
+            onKeyDown={e => { if (e.key === 'Enter' && !loginBusy) handleAuth(); }}
+            placeholder="비밀번호 (6자 이상)"
+            disabled={loginBusy}
+            className={`w-full p-4 rounded-2xl bg-gray-100 dark:bg-gray-900 border-2 outline-none focus:ring-2 transition-all ${loginError ? 'border-red-500 focus:ring-red-500/30' : 'border-transparent focus:ring-[#7C5CFC]'} disabled:opacity-50`}
+            autoComplete={authMode === 'signup' ? 'new-password' : 'current-password'}
+          />
+
+          {loginError && (
+            <p className="text-xs font-bold text-red-500 px-2">{loginError}</p>
+          )}
+
+          <button
+            onClick={handleAuth}
+            disabled={loginBusy || !loginHandle.trim() || !loginPassword}
+            className="w-full bg-[#7C5CFC] text-white p-4 rounded-2xl font-bold flex items-center justify-center gap-2 hover:opacity-90 transition-all disabled:opacity-50"
+          >
+            {loginBusy
+              ? <><Loader2 size={20} className="animate-spin" /> 처리 중...</>
+              : authMode === 'signup'
+                ? <><Plus size={20} /> 회원가입</>
+                : <><LogIn size={20} /> 로그인</>}
           </button>
+
+          {/* 구분선 */}
+          <div className="flex items-center gap-3 py-1">
+            <div className="flex-1 h-px bg-gray-200 dark:bg-gray-800" />
+            <span className="text-xs text-gray-400 font-bold">또는</span>
+            <div className="flex-1 h-px bg-gray-200 dark:bg-gray-800" />
+          </div>
+
+          {/* Google 로그인 */}
+          <button
+            onClick={handleGoogleLogin}
+            disabled={loginBusy}
+            className="w-full bg-white dark:bg-gray-900 border-2 border-gray-200 dark:border-gray-800 text-gray-700 dark:text-gray-200 p-4 rounded-2xl font-bold flex items-center justify-center gap-3 hover:bg-gray-50 dark:hover:bg-gray-800 transition-all disabled:opacity-50"
+          >
+            <svg width="20" height="20" viewBox="0 0 18 18">
+              <path fill="#4285F4" d="M17.64 9.2c0-.637-.057-1.251-.164-1.84H9v3.481h4.844a4.14 4.14 0 0 1-1.796 2.716v2.259h2.908c1.702-1.567 2.684-3.875 2.684-6.615z"/>
+              <path fill="#34A853" d="M9 18c2.43 0 4.467-.806 5.956-2.18l-2.908-2.259c-.806.54-1.837.86-3.048.86-2.344 0-4.328-1.584-5.036-3.711H.957v2.332A8.997 8.997 0 0 0 9 18z"/>
+              <path fill="#FBBC05" d="M3.964 10.71A5.41 5.41 0 0 1 3.682 9c0-.593.102-1.17.282-1.71V4.958H.957A8.996 8.996 0 0 0 0 9c0 1.452.348 2.827.957 4.042l3.007-2.332z"/>
+              <path fill="#EA4335" d="M9 3.58c1.321 0 2.508.454 3.44 1.345l2.582-2.58C13.463.891 11.426 0 9 0A8.997 8.997 0 0 0 .957 4.958L3.964 7.29C4.672 5.163 6.656 3.58 9 3.58z"/>
+            </svg>
+            Google로 계속하기
+          </button>
+
+          {/* 모드 토글 */}
+          <div className="text-center pt-2">
+            <button
+              onClick={() => { setAuthMode(authMode === 'login' ? 'signup' : 'login'); setLoginError(''); }}
+              className="text-sm text-gray-500 hover:text-[#7C5CFC] font-bold transition-all"
+            >
+              {authMode === 'login' ? '계정이 없으신가요? 회원가입 →' : '이미 계정이 있으신가요? 로그인 →'}
+            </button>
+          </div>
+
+          <p className="text-xs text-gray-400 dark:text-gray-500 text-center pt-2 font-bold">아이디: 2~20자 / 영문·숫자·_</p>
         </div>
       </div>
     );
@@ -566,38 +1053,7 @@ export default function App() {
                   })} />
             )}
             
-            {activeTab === 'ranking' && (
-              <div className="p-4 pb-24 space-y-4">
-                <div className="flex justify-between items-center mb-4">
-                  <h2 className="text-2xl font-black">랭킹</h2>
-                  <button onClick={() => setRankingMode(rankingMode === 'overall' ? 'song' : 'overall')} className="text-xs font-bold bg-[#7C5CFC]/10 text-[#7C5CFC] px-3 py-1.5 rounded-full">
-                    {rankingMode === 'overall' ? '개별곡 랭킹 보기' : '전체 랭킹 보기'}
-                  </button>
-                </div>
-                {rankingMode === 'overall' ? (
-                  <div className="space-y-3">
-                    {DUMMY_OVERALL.map((user) => (
-                      <div key={user.id} className="flex items-center gap-4 p-4 bg-gray-50 dark:bg-gray-900 rounded-[1.5rem]">
-                        <div className="flex flex-col items-center w-8">
-                          <span className="text-xl font-black">{user.rank}</span>
-                          <span className="text-[10px] font-bold">{user.diff > 0 ? <span className="text-red-500">▲{user.diff}</span> : user.diff < 0 ? <span className="text-blue-500">▼{Math.abs(user.diff)}</span> : <span className="text-gray-400">-</span>}</span>
-                        </div>
-                        <img src={user.img} className="w-12 h-12 rounded-full border-2 border-transparent hover:border-[#7C5CFC] cursor-pointer" onClick={() => setActiveTab('profile')} />
-                        <div className="flex-1">
-                          <p className="font-bold text-lg">{user.name}</p>
-                          <p className="text-xs text-gray-500">합계 {user.total.toLocaleString()} | 최고 {user.max}점</p>
-                        </div>
-                      </div>
-                    ))}
-                  </div>
-                ) : (
-                  <div className="space-y-4">
-                    <div className="relative"><Search className="absolute left-4 top-4 text-gray-400" size={18} /><input type="text" placeholder="챌린지 검색" className="w-full p-4 pl-12 rounded-2xl bg-gray-100 dark:bg-gray-900 outline-none focus:ring-2 focus:ring-[#7C5CFC]" /></div>
-                    <div className="p-4 border-l-4 border-[#7C5CFC] bg-gray-50 dark:bg-gray-900 rounded-r-2xl mb-4"><p className="text-xs text-[#7C5CFC] font-bold">인기 곡</p><p className="font-black text-lg">Hype Boy - NewJeans</p></div>
-                  </div>
-                )}
-              </div>
-            )}
+            {activeTab === 'ranking' && <RankingView userProfile={userProfile} />}
 
             {activeTab === 'profile' && userProfile && (
               <div className="p-4 pb-24">
@@ -691,7 +1147,34 @@ export default function App() {
 
         {challengeClipUrl && (
           <div className="fixed inset-0 z-[200] bg-black">
-            <ChallengeComponent videoUrl={`${API_URL}${challengeClipUrl}`} playbackRate={challengeSpeed} userStickmanColor={userColor} onBack={() => { setChallengeClipUrl(''); setIsLearning(true); }} />
+            <ChallengeComponent
+              videoUrl={`${API_URL}${challengeClipUrl}`}
+              playbackRate={challengeSpeed}
+              userStickmanColor={userColor}
+              challengeTitle={selectedChallenge?.title}
+              challengeArtist={selectedChallenge?.music?.artist}
+              challengeId={selectedChallenge?.id}
+              challengeMusicId={selectedChallenge?.music?.id}
+              currentUserId={userProfile?.id}
+              onBack={() => { setChallengeClipUrl(''); setIsLearning(true); }}
+              onComplete={async (score) => {
+                if (!userProfile || !selectedChallenge) return;
+                try {
+                  await addDoc(collection(db, 'submissions'), {
+                    userId: userProfile.id,
+                    displayName: userProfile.displayName,
+                    challengeId: selectedChallenge.id,
+                    challengeTitle: selectedChallenge.title,
+                    musicId: selectedChallenge.music?.id ?? null,
+                    musicTitle: selectedChallenge.music?.title ?? null,
+                    musicArtist: selectedChallenge.music?.artist ?? null,
+                    musicAlbumArt: selectedChallenge.music?.albumArt ?? null,
+                    score,
+                    timestamp: serverTimestamp(),
+                  });
+                } catch (err) { console.warn('submission save failed', err); }
+              }}
+            />
           </div>
         )}
 
@@ -721,6 +1204,30 @@ export default function App() {
                   <div className="px-5 py-3">
                     <p className="text-xs font-bold text-gray-400 mb-1">로그인 계정</p>
                     <p className="font-bold">@{userProfile?.id}</p>
+                  </div>
+                  {/* MVP 데모용 시드 데이터 */}
+                  <div className="px-5 pt-2 pb-1">
+                    <p className="text-xs font-bold text-gray-400">데모 / 개발</p>
+                  </div>
+                  <button
+                    onClick={handleSeedAdd}
+                    disabled={seedBusy !== 'idle'}
+                    className="w-full flex items-center gap-3 px-5 py-3 rounded-2xl text-gray-700 dark:text-gray-200 hover:bg-gray-50 dark:hover:bg-gray-900 transition-all font-bold disabled:opacity-50"
+                  >
+                    {seedBusy === 'adding' ? <Loader2 size={20} className="animate-spin" /> : <span className="text-xl">🎲</span>}
+                    {seedBusy === 'adding' ? '추가 중...' : '테스트 데이터 추가'}
+                  </button>
+                  <button
+                    onClick={handleSeedRemove}
+                    disabled={seedBusy !== 'idle'}
+                    className="w-full flex items-center gap-3 px-5 py-3 rounded-2xl text-gray-500 hover:bg-gray-50 dark:hover:bg-gray-900 transition-all font-bold disabled:opacity-50"
+                  >
+                    {seedBusy === 'removing' ? <Loader2 size={20} className="animate-spin" /> : <span className="text-xl">🗑️</span>}
+                    {seedBusy === 'removing' ? '삭제 중...' : '테스트 데이터 삭제'}
+                  </button>
+
+                  <div className="px-5 pt-3 pb-1 mt-2 border-t border-gray-100 dark:border-gray-900">
+                    <p className="text-xs font-bold text-gray-400">계정</p>
                   </div>
                   <button
                     onClick={handleLogout}
