@@ -742,9 +742,28 @@ export default function App() {
   useEffect(() => {
     if (!analysis || analysis.status !== 'analyzing') return;
     const jobId = analysis.jobId;
+    let consecutive404 = 0;
+    const MAX_404 = 5; // 약 7.5초 동안 404 → 서버 재시작 등으로 작업 유실 판정
+
     const poll = setInterval(async () => {
       try {
         const res = await fetch(`${API_URL}/status/${jobId}`);
+
+        // 백엔드 재시작 등으로 job 유실 → 404 누적 시 사용자에게 알리고 종료
+        if (res.status === 404) {
+          consecutive404++;
+          if (consecutive404 >= MAX_404) {
+            clearInterval(poll);
+            setAnalysis(prev => prev && prev.jobId === jobId ? {
+              ...prev,
+              status: 'error',
+              message: '서버가 작업 정보를 잃었습니다. 새로고침 후 다시 시도해주세요.',
+            } : prev);
+          }
+          return;
+        }
+        consecutive404 = 0; // 정상 응답 들어오면 카운터 리셋
+
         const result = await res.json();
 
         if (result.status === 'done') {
@@ -772,7 +791,7 @@ export default function App() {
           setAnalysis(prev => prev && prev.jobId === jobId ? { ...prev, progress: result.progress ?? prev.progress, message: result.message ?? prev.message } : prev);
         }
       } catch {
-        // 일시적 네트워크 오류는 무시하고 다음 폴링에서 재시도
+        // 일시적 네트워크 오류는 무시하고 다음 폴링에서 재시도 (404는 위에서 별도 처리)
       }
     }, 1500);
     return () => clearInterval(poll);
