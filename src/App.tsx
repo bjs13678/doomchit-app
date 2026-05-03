@@ -1,13 +1,15 @@
 import { useState, useEffect, useRef } from 'react'; import { motion, 
 AnimatePresence } from 'motion/react'; import { Trophy, User, Play, Plus,
 Upload, Loader2, CheckCircle, Palette, UserCheck, Search, ChevronUp,
-ChevronDown, Minus, LogIn, Settings, LogOut, X } from 'lucide-react'; import { doc, getDoc, setDoc,
+ChevronDown, Minus, LogIn, Settings, LogOut, X, Trash2, Heart, Camera } from 'lucide-react'; import { doc, getDoc, setDoc,
 collection, addDoc, serverTimestamp, onSnapshot, query, orderBy, limit, where, getDocs, deleteDoc }
 from 'firebase/firestore'; import { onAuthStateChanged } from 
 'firebase/auth'; import {
 createUserWithEmailAndPassword, signInWithEmailAndPassword, signOut, updateProfile,
 GoogleAuthProvider, signInWithPopup
-} from 'firebase/auth'; import { db, auth } from './firebase'; import 
+} from 'firebase/auth'; import {
+ref as storageRef, uploadBytes, getDownloadURL
+} from 'firebase/storage'; import { db, auth, storage } from './firebase'; import 
 './index.css'; import './i18n'; import Learn from './Learn'; import 
 ChallengeComponent from './Challenge';
 
@@ -242,7 +244,7 @@ const UploadView = ({ onStartAnalysis }: {
       await fetch(`${API_URL}/start/${jobId}`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ targetColor, targetBox: selectedBox })
+        body: JSON.stringify({ targetColor, targetBox: selectedBox, hasMusic: !noMusic && !!selectedMusic })
       });
       onStartAnalysis({ jobId, title: title.trim(), userColor, targetColor, selectedBox, music: noMusic ? null : selectedMusic });
     } catch (err) {
@@ -351,15 +353,48 @@ const UploadView = ({ onStartAnalysis }: {
   );
 };
 
-// ── 피드 화면 (파이어베이스 기능 + 숏폼 UI + 노래 검색 필터) ─────────────────────────
-const FeedView = ({ onSelectChallenge }: { onSelectChallenge: (c: ChallengeData) => void }) => {
+// ── 피드 화면 (파이어베이스 기능 + 숏폼 UI + 노래 검색 필터 + 좋아요) ────────────────────
+const FeedView = ({ onSelectChallenge, userProfile, followingIds, onToggleFollow }: {
+  onSelectChallenge: (c: ChallengeData) => void;
+  userProfile: UserProfile | null;
+  followingIds: Set<string>;
+  onToggleFollow: (targetId: string) => void;
+}) => {
   const [challenges, setChallenges] = useState<ChallengeData[]>([]);
   const [filterTrack, setFilterTrack] = useState<Track | null>(null);
+  const [likedIds, setLikedIds] = useState<Set<string>>(new Set());
+  const [likeCounts, setLikeCounts] = useState<Map<string, number>>(new Map());
 
   useEffect(() => {
     const q = query(collection(db, 'challenges'), orderBy('timestamp', 'desc'), limit(20));
     return onSnapshot(q, snap => setChallenges(snap.docs.map(d => ({ id: d.id, ...d.data() } as ChallengeData))));
   }, []);
+
+  // 좋아요 데이터 구독 (자기 좋아요 + 전체 카운트)
+  useEffect(() => {
+    return onSnapshot(collection(db, 'likes'), snap => {
+      const mine = new Set<string>();
+      const counts = new Map<string, number>();
+      snap.docs.forEach(d => {
+        const data = d.data() as any;
+        counts.set(data.challengeId, (counts.get(data.challengeId) || 0) + 1);
+        if (userProfile && data.userId === userProfile.id) mine.add(data.challengeId);
+      });
+      setLikedIds(mine);
+      setLikeCounts(counts);
+    });
+  }, [userProfile?.id]);
+
+  const toggleLike = async (challengeId: string) => {
+    if (!userProfile) return;
+    const likeId = `${userProfile.id}_${challengeId}`;
+    const ref = doc(db, 'likes', likeId);
+    if (likedIds.has(challengeId)) {
+      await deleteDoc(ref);
+    } else {
+      await setDoc(ref, { userId: userProfile.id, challengeId, timestamp: serverTimestamp() });
+    }
+  };
 
   const displayed = filterTrack
     ? challenges.filter(c => c.music?.id === filterTrack.id)
@@ -395,11 +430,14 @@ const FeedView = ({ onSelectChallenge }: { onSelectChallenge: (c: ChallengeData)
         </div>
       )}
 
-      {displayed.map(c => (
+      {displayed.map(c => {
+        const liked = likedIds.has(c.id);
+        const count = likeCounts.get(c.id) || 0;
+        return (
         <div key={c.id} onClick={() => onSelectChallenge(c)} className="relative aspect-[3/4] bg-gray-200 dark:bg-gray-900 rounded-[2rem] overflow-hidden shadow-lg group cursor-pointer">
           {c.clips && c.clips[0] && <img src={resolveUrl(c.clips[0].thumb_url)} className="absolute inset-0 w-full h-full object-cover" alt={c.title} />}
           <div className="absolute inset-0 bg-gradient-to-t from-black/80 via-black/20 to-transparent" />
-          <div className="absolute bottom-6 left-6 right-6">
+          <div className="absolute bottom-6 left-6 right-20">
             <h3 className="text-white text-3xl font-black mb-1">{c.title}</h3>
             {c.music && (
               <div className="flex items-center gap-2 mb-1">
@@ -407,13 +445,35 @@ const FeedView = ({ onSelectChallenge }: { onSelectChallenge: (c: ChallengeData)
                 <p className="text-white/90 text-xs font-bold truncate">{c.music.title} — {c.music.artist}</p>
               </div>
             )}
-            <p className="text-white/70 text-sm font-bold">@{c.creatorName}</p>
+            <div className="flex items-center gap-2">
+              <p className="text-white/70 text-sm font-bold">@{c.creatorName}</p>
+              {userProfile && c.creatorId !== userProfile.id && (
+                <button
+                  onClick={(e) => { e.stopPropagation(); onToggleFollow(c.creatorId); }}
+                  className={`text-[10px] font-black px-2 py-0.5 rounded-full ${
+                    followingIds.has(c.creatorId)
+                      ? 'bg-white/20 text-white border border-white/40'
+                      : 'bg-[#7C5CFC] text-white'
+                  }`}
+                >
+                  {followingIds.has(c.creatorId) ? '팔로잉' : '+ 팔로우'}
+                </button>
+              )}
+            </div>
           </div>
-          <button className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 bg-white/20 backdrop-blur-md p-5 rounded-full opacity-0 group-hover:opacity-100 transition-all">
+          <button
+            onClick={(e) => { e.stopPropagation(); toggleLike(c.id); }}
+            className="absolute bottom-6 right-5 flex flex-col items-center gap-1 group/like"
+          >
+            <Heart size={32} className={`transition-all ${liked ? 'fill-red-500 text-red-500 scale-110' : 'text-white group-hover/like:scale-110'} drop-shadow-lg`} />
+            <span className="text-white text-xs font-black drop-shadow-lg">{count}</span>
+          </button>
+          <button className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 bg-white/20 backdrop-blur-md p-5 rounded-full opacity-0 group-hover:opacity-100 transition-all pointer-events-none">
             <Play fill="white" color="white" size={32} />
           </button>
         </div>
-      ))}
+        );
+      })}
     </div>
   );
 };
@@ -600,6 +660,9 @@ export default function App() {
   const [myChallenges, setMyChallenges] = useState<ChallengeData[]>([]);
   const [analysis, setAnalysis] = useState<AnalysisState | null>(null);
   const [showSettings, setShowSettings] = useState(false);
+  const [followingIds, setFollowingIds] = useState<Set<string>>(new Set());
+  const [followerCount, setFollowerCount] = useState(0);
+  const [followingCount, setFollowingCount] = useState(0);
   const [seedBusy, setSeedBusy] = useState<'idle' | 'adding' | 'removing'>('idle');
 
   const SEED_USERS = [
@@ -685,6 +748,43 @@ export default function App() {
     }
   };
 
+  const [uploadingAvatar, setUploadingAvatar] = useState(false);
+
+  const handleAvatarUpload = async (file: File) => {
+    if (!userProfile || !auth.currentUser) return;
+    if (!file.type.startsWith('image/')) { alert('이미지 파일만 업로드 가능해요'); return; }
+    if (file.size > 5 * 1024 * 1024) { alert('5MB 이하 이미지만 가능해요'); return; }
+    setUploadingAvatar(true);
+    try {
+      const ext = file.name.split('.').pop() || 'jpg';
+      const ref = storageRef(storage, `avatars/${auth.currentUser.uid}/profile.${ext}`);
+      await uploadBytes(ref, file);
+      const url = await getDownloadURL(ref);
+      await setDoc(doc(db, 'users', userProfile.id), { photoURL: url }, { merge: true });
+      setUserProfile({ ...userProfile, photoURL: url });
+    } catch (err) {
+      alert('사진 업로드 실패: ' + err);
+    } finally {
+      setUploadingAvatar(false);
+    }
+  };
+
+  const handleDeleteChallenge = async (c: ChallengeData) => {
+    if (!userProfile || c.creatorId !== userProfile.id) return;
+    if (!confirm(`"${c.title}" 챌린지를 정말 삭제할까요?\n관련 도전 기록도 함께 삭제됩니다.`)) return;
+    try {
+      // 1) 이 챌린지의 모든 submissions 삭제
+      const subsSnap = await getDocs(query(collection(db, 'submissions'), where('challengeId', '==', c.id)));
+      await Promise.all(subsSnap.docs.map(d => deleteDoc(d.ref)));
+      // 2) 챌린지 도큐 삭제
+      await deleteDoc(doc(db, 'challenges', c.id));
+      // (Storage 파일은 시간 지나면 자연 정리됨; 여기서 즉시 삭제하지 않음)
+    } catch (err) {
+      alert('삭제 실패: ' + err);
+      console.warn('delete challenge failed', err);
+    }
+  };
+
   const handleLogout = async () => {
     if (!confirm('로그아웃 하시겠어요?')) return;
     try { await signOut(auth); } catch {}
@@ -741,6 +841,34 @@ export default function App() {
     const q = query(collection(db, 'challenges'), where('creatorId', '==', userProfile.id), orderBy('timestamp', 'desc'));
     return onSnapshot(q, snap => setMyChallenges(snap.docs.map(d => ({ id: d.id, ...d.data() } as ChallengeData))));
   }, [userProfile, activeTab]);
+
+  // 내가 팔로우하는 사람들
+  useEffect(() => {
+    if (!userProfile) { setFollowingIds(new Set()); setFollowingCount(0); return; }
+    const q = query(collection(db, 'follows'), where('followerId', '==', userProfile.id));
+    return onSnapshot(q, snap => {
+      setFollowingIds(new Set(snap.docs.map(d => (d.data() as any).followingId)));
+      setFollowingCount(snap.size);
+    });
+  }, [userProfile?.id]);
+
+  // 나를 팔로우하는 사람들 카운트
+  useEffect(() => {
+    if (!userProfile) { setFollowerCount(0); return; }
+    const q = query(collection(db, 'follows'), where('followingId', '==', userProfile.id));
+    return onSnapshot(q, snap => setFollowerCount(snap.size));
+  }, [userProfile?.id]);
+
+  const toggleFollow = async (targetId: string) => {
+    if (!userProfile || targetId === userProfile.id) return;
+    const followId = `${userProfile.id}_${targetId}`;
+    const ref = doc(db, 'follows', followId);
+    if (followingIds.has(targetId)) {
+      await deleteDoc(ref);
+    } else {
+      await setDoc(ref, { followerId: userProfile.id, followingId: targetId, timestamp: serverTimestamp() });
+    }
+  };
 
   // 분석 폴링: App 레벨에서 동작 → 탭 전환과 무관하게 계속 진행
   useEffect(() => {
@@ -1062,7 +1190,7 @@ export default function App() {
       <main className="pt-16 pb-24 max-w-md mx-auto min-h-screen relative shadow-2xl bg-white dark:bg-black">
         {!isLearning && !challengeClipUrl && (
           <div className="pt-4 animate-fade-in">
-            {activeTab === 'feed' && <FeedView onSelectChallenge={c => { setSelectedChallenge(c); setIsLearning(true); }} />}
+            {activeTab === 'feed' && <FeedView userProfile={userProfile} followingIds={followingIds} onToggleFollow={toggleFollow} onSelectChallenge={c => { setSelectedChallenge(c); setIsLearning(true); }} />}
             {activeTab === 'upload' && (
               analysis
                 ? <AnalysisProgressView analysis={analysis} onDismiss={() => setAnalysis(null)} />
@@ -1083,17 +1211,29 @@ export default function App() {
               <div className="p-4 pb-24">
                 <div className="flex items-center justify-between mb-6 mt-2">
                   <div className="flex items-center gap-6">
-                    <div className="w-24 h-24 rounded-full bg-gradient-to-tr from-[#7C5CFC] to-[#D8D8EC] p-1">
-                      <div className="w-full h-full rounded-full border-4 border-white dark:border-black bg-gray-200 dark:bg-gray-800 flex items-center justify-center">
-                        <User size={36} className="text-gray-400" />
+                    <label className="relative w-24 h-24 rounded-full bg-gradient-to-tr from-[#7C5CFC] to-[#D8D8EC] p-1 cursor-pointer group block">
+                      <div className="w-full h-full rounded-full border-4 border-white dark:border-black bg-gray-200 dark:bg-gray-800 flex items-center justify-center overflow-hidden">
+                        {userProfile.photoURL ? (
+                          <img src={userProfile.photoURL} alt="" className="w-full h-full object-cover" />
+                        ) : (
+                          <User size={36} className="text-gray-400" />
+                        )}
                       </div>
-                    </div>
+                      <div className="absolute inset-1 rounded-full bg-black/40 opacity-0 group-hover:opacity-100 transition-all flex items-center justify-center">
+                        {uploadingAvatar ? <Loader2 className="animate-spin text-white" size={20} /> : <Camera className="text-white" size={20} />}
+                      </div>
+                      <input
+                        type="file" accept="image/*" className="hidden"
+                        onChange={(e) => { const f = e.target.files?.[0]; if (f) handleAvatarUpload(f); }}
+                      />
+                    </label>
                     <div>
                       <h2 className="text-2xl font-black mb-1">{userProfile.displayName}</h2>
                       <p className="text-[#7C5CFC] font-bold text-sm">@{userProfile.id}</p>
                       <div className="flex gap-4 mt-3 text-xs font-bold text-gray-500">
                         <span>게시물 {myChallenges.length}</span>
-                        <span>레벨 {userProfile.level}</span>
+                        <span>팔로워 {followerCount}</span>
+                        <span>팔로잉 {followingCount}</span>
                       </div>
                     </div>
                   </div>
@@ -1123,6 +1263,13 @@ export default function App() {
                         )}
                         <div className="absolute inset-0 bg-black/0 group-hover:bg-black/40 transition-all" />
                         <Play size={20} className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 text-white opacity-0 group-hover:opacity-100" />
+                        <button
+                          onClick={(e) => { e.stopPropagation(); handleDeleteChallenge(c); }}
+                          className="absolute top-1.5 right-1.5 p-1.5 rounded-full bg-black/50 text-white opacity-0 group-hover:opacity-100 hover:bg-red-500 transition-all"
+                          aria-label="삭제"
+                        >
+                          <Trash2 size={14} />
+                        </button>
                       </div>
                     ))}
                   </div>
@@ -1165,7 +1312,7 @@ export default function App() {
 
         {isLearning && selectedChallenge && (
           <div className="fixed inset-0 z-[200] bg-black">
-            <Learn clips={selectedChallenge.clips} jobId={selectedChallenge.jobId} apiUrl={API_URL} fullVideoUrl={selectedChallenge.fullVideoUrl ?? undefined} onStartChallenge={(url, speed) => { setChallengeClipUrl(url); setChallengeSpeed(speed); setIsLearning(false); }} onBack={() => { setIsLearning(false); setSelectedChallenge(null); }} />
+            <Learn clips={selectedChallenge.clips} jobId={selectedChallenge.jobId} apiUrl={API_URL} fullVideoUrl={selectedChallenge.fullVideoUrl ?? undefined} challengeId={selectedChallenge.id} currentUserId={userProfile?.id} currentDisplayName={userProfile?.displayName} onStartChallenge={(url, speed) => { setChallengeClipUrl(url); setChallengeSpeed(speed); setIsLearning(false); }} onBack={() => { setIsLearning(false); setSelectedChallenge(null); }} />
           </div>
         )}
 
