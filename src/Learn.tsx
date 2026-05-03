@@ -12,9 +12,13 @@ interface Props {
   clips: Clip[];
   jobId: string;
   apiUrl: string;
-  onStartChallenge: (clipUrl: string, speed: number) => void; 
+  fullVideoUrl?: string;
+  onStartChallenge: (clipUrl: string, speed: number) => void;
   onBack: () => void;
 }
+
+// Firebase Storage 절대 URL 또는 백엔드 상대 경로를 모두 처리
+const resolveUrl = (apiUrl: string, url: string) => url.startsWith('http') ? url : `${apiUrl}${url}`;
 
 const SPEEDS = [
   { label: '매우 쉬움', rate: 0.5 },
@@ -24,7 +28,7 @@ const SPEEDS = [
   { label: '매우 빠름', rate: 1.5 },
 ];
 
-export default function Learn({ clips, jobId, apiUrl, onStartChallenge, onBack }: Props) {
+export default function Learn({ clips, jobId, apiUrl, fullVideoUrl, onStartChallenge, onBack }: Props) {
   const [currentIndex, setCurrentIndex] = useState(0);
   const [isPlaying, setIsPlaying] = useState(false);
   const [playbackRate, setPlaybackRate] = useState(1.0);
@@ -104,7 +108,7 @@ export default function Learn({ clips, jobId, apiUrl, onStartChallenge, onBack }
           /* 💡 핵심 수정 포인트: object-cover -> object-contain bg-black */
           <video
             ref={videoRef}
-            src={`${apiUrl}${current!.video_url}`}
+            src={resolveUrl(apiUrl, current!.video_url)}
             className="w-full h-full object-contain bg-black"
             onEnded={() => setIsPlaying(false)}
             playsInline
@@ -146,7 +150,7 @@ export default function Learn({ clips, jobId, apiUrl, onStartChallenge, onBack }
       </div>
 
       <button 
-        onClick={() => onStartChallenge(isFinalStep ? `/full-video/${jobId}` : current!.video_url, playbackRate)} 
+        onClick={() => onStartChallenge(isFinalStep ? (fullVideoUrl ?? `/full-video/${jobId}`) : current!.video_url, playbackRate)}
         className={`w-full max-w-sm py-5 font-black text-lg rounded-2xl flex items-center justify-center gap-3 shrink-0 transition-all ${
           isFinalStep 
             ? 'bg-gradient-to-r from-green-400 to-emerald-500 text-black shadow-[0_0_30px_rgba(74,222,128,0.4)] hover:scale-[1.02]' 

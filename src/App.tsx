@@ -13,6 +13,10 @@ ChallengeComponent from './Challenge';
 
 const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:8000';
 
+// 백엔드가 절대 URL(Firebase Storage) 또는 상대 경로(/clip/, /thumb/, /full-video/)를 줄 수 있어
+// 절대 URL이면 그대로, 상대 경로면 API_URL 앞에 붙임
+const resolveUrl = (url: string) => url.startsWith('http') ? url : `${API_URL}${url}`;
+
 // --- [디자인 폰트 설정] ---
 const LOGO_FONT = "font-['Black_Han_Sans']";
 const MAIN_FONT = "font-['Noto_Sans_KR']";
@@ -26,7 +30,7 @@ const PRESET_COLORS = [
 interface UserProfile { id: string; displayName: string; photoURL?: string; level: number; exp: number; badges: string[]; }
 interface Clip { index: number; start_frame: number; end_frame: number; duration: number; video_url: string; thumb_url: string; }
 interface Track { id: string; title: string; artist: string; albumArt: string | null; previewUrl: string | null; }
-interface ChallengeData { id: string; title: string; creatorName: string; creatorId: string; jobId: string; clips: Clip[]; difficulty: string; likeCount: number; participantCount: number; timestamp: any; music?: Track | null; }
+interface ChallengeData { id: string; title: string; creatorName: string; creatorId: string; jobId: string; clips: Clip[]; difficulty: string; likeCount: number; participantCount: number; timestamp: any; music?: Track | null; fullVideoUrl?: string | null; }
 
 // ── Spotify 음악 검색 컴포넌트 (업로드 + 피드 공용) ──────────────────────────────
 const MusicSearch = ({ onSelect, selected, onClear }: {
@@ -257,7 +261,7 @@ const UploadView = ({ onStartAnalysis }: {
         </p>
 
         <div className="relative w-full rounded-2xl overflow-hidden bg-black shadow-lg border border-gray-200 dark:border-gray-800" style={{ aspectRatio: `${frameInfo.w} / ${frameInfo.h}` }}>
-          <img src={`${API_URL}${frameInfo.url}`} alt="First Frame" className="absolute inset-0 w-full h-full object-cover" />
+          <img src={resolveUrl(frameInfo.url)} alt="First Frame" className="absolute inset-0 w-full h-full object-cover" />
           {frameInfo.boxes.map((box, i) => {
             const [x1, y1, x2, y2] = box;
             const left = (x1 / frameInfo.w) * 100;
@@ -393,7 +397,7 @@ const FeedView = ({ onSelectChallenge }: { onSelectChallenge: (c: ChallengeData)
 
       {displayed.map(c => (
         <div key={c.id} onClick={() => onSelectChallenge(c)} className="relative aspect-[3/4] bg-gray-200 dark:bg-gray-900 rounded-[2rem] overflow-hidden shadow-lg group cursor-pointer">
-          {c.clips && c.clips[0] && <img src={`${API_URL}${c.clips[0].thumb_url}`} className="absolute inset-0 w-full h-full object-cover" alt={c.title} />}
+          {c.clips && c.clips[0] && <img src={resolveUrl(c.clips[0].thumb_url)} className="absolute inset-0 w-full h-full object-cover" alt={c.title} />}
           <div className="absolute inset-0 bg-gradient-to-t from-black/80 via-black/20 to-transparent" />
           <div className="absolute bottom-6 left-6 right-6">
             <h3 className="text-white text-3xl font-black mb-1">{c.title}</h3>
@@ -781,6 +785,7 @@ export default function App() {
               likeCount: 0,
               participantCount: 0,
               music: analysis.music ?? null,
+              fullVideoUrl: result.full_video_url ?? null,
               timestamp: serverTimestamp(),
             });
           } catch (err) { console.warn('Firestore save failed:', err); }
@@ -1114,7 +1119,7 @@ export default function App() {
                         className="aspect-square bg-gray-100 dark:bg-gray-900 relative group cursor-pointer overflow-hidden"
                       >
                         {c.clips?.[0] && (
-                          <img src={`${API_URL}${c.clips[0].thumb_url}`} className="absolute inset-0 w-full h-full object-cover" alt={c.title} />
+                          <img src={resolveUrl(c.clips[0].thumb_url)} className="absolute inset-0 w-full h-full object-cover" alt={c.title} />
                         )}
                         <div className="absolute inset-0 bg-black/0 group-hover:bg-black/40 transition-all" />
                         <Play size={20} className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 text-white opacity-0 group-hover:opacity-100" />
@@ -1160,14 +1165,14 @@ export default function App() {
 
         {isLearning && selectedChallenge && (
           <div className="fixed inset-0 z-[200] bg-black">
-            <Learn clips={selectedChallenge.clips} jobId={selectedChallenge.jobId} apiUrl={API_URL} onStartChallenge={(url, speed) => { setChallengeClipUrl(url); setChallengeSpeed(speed); setIsLearning(false); }} onBack={() => { setIsLearning(false); setSelectedChallenge(null); }} />
+            <Learn clips={selectedChallenge.clips} jobId={selectedChallenge.jobId} apiUrl={API_URL} fullVideoUrl={selectedChallenge.fullVideoUrl ?? undefined} onStartChallenge={(url, speed) => { setChallengeClipUrl(url); setChallengeSpeed(speed); setIsLearning(false); }} onBack={() => { setIsLearning(false); setSelectedChallenge(null); }} />
           </div>
         )}
 
         {challengeClipUrl && (
           <div className="fixed inset-0 z-[200] bg-black">
             <ChallengeComponent
-              videoUrl={`${API_URL}${challengeClipUrl}`}
+              videoUrl={resolveUrl(challengeClipUrl)}
               playbackRate={challengeSpeed}
               userStickmanColor={userColor}
               challengeTitle={selectedChallenge?.title}
