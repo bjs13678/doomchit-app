@@ -32,7 +32,7 @@ const PRESET_COLORS = [
 interface UserProfile { id: string; displayName: string; photoURL?: string; level: number; exp: number; badges: string[]; }
 interface Clip { index: number; start_frame: number; end_frame: number; duration: number; video_url: string; thumb_url: string; }
 interface Track { id: string; title: string; artist: string; albumArt: string | null; previewUrl: string | null; }
-interface ChallengeData { id: string; title: string; creatorName: string; creatorId: string; jobId: string; clips: Clip[]; difficulty: string; likeCount: number; participantCount: number; timestamp: any; music?: Track | null; fullVideoUrl?: string | null; }
+interface ChallengeData { id: string; title: string; creatorName: string; creatorId: string; jobId: string; clips: Clip[]; difficulty: string; likeCount: number; participantCount: number; timestamp: any; music?: Track | null; fullVideoUrl?: string | null; originalVideoUrl?: string | null; }
 
 // ── Spotify 음악 검색 컴포넌트 (업로드 + 피드 공용) ──────────────────────────────
 const MusicSearch = ({ onSelect, selected, onClear }: {
@@ -914,6 +914,7 @@ export default function App() {
               participantCount: 0,
               music: analysis.music ?? null,
               fullVideoUrl: result.full_video_url ?? null,
+              originalVideoUrl: result.original_video_url ?? null,
               timestamp: serverTimestamp(),
             });
           } catch (err) { console.warn('Firestore save failed:', err); }
@@ -1312,7 +1313,7 @@ export default function App() {
 
         {isLearning && selectedChallenge && (
           <div className="fixed inset-0 z-[200] bg-black">
-            <Learn clips={selectedChallenge.clips} jobId={selectedChallenge.jobId} apiUrl={API_URL} fullVideoUrl={selectedChallenge.fullVideoUrl ?? undefined} challengeId={selectedChallenge.id} currentUserId={userProfile?.id} currentDisplayName={userProfile?.displayName} onStartChallenge={(url, speed) => { setChallengeClipUrl(url); setChallengeSpeed(speed); setIsLearning(false); }} onBack={() => { setIsLearning(false); setSelectedChallenge(null); }} />
+            <Learn clips={selectedChallenge.clips} jobId={selectedChallenge.jobId} apiUrl={API_URL} fullVideoUrl={selectedChallenge.fullVideoUrl ?? undefined} originalVideoUrl={selectedChallenge.originalVideoUrl ?? undefined} challengeId={selectedChallenge.id} currentUserId={userProfile?.id} currentDisplayName={userProfile?.displayName} onStartChallenge={(url, speed) => { setChallengeClipUrl(url); setChallengeSpeed(speed); setIsLearning(false); }} onBack={() => { setIsLearning(false); setSelectedChallenge(null); }} />
           </div>
         )}
 

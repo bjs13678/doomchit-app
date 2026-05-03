@@ -23,6 +23,7 @@ interface Props {
   jobId: string;
   apiUrl: string;
   fullVideoUrl?: string;
+  originalVideoUrl?: string;  // 스틱맨 없는 원본 (미리보기 토글용)
   challengeId?: string;       // 댓글용
   currentUserId?: string;     // 댓글 작성자 표시 + 본인 댓글 삭제
   currentDisplayName?: string;
@@ -41,7 +42,7 @@ const SPEEDS = [
   { label: '매우 빠름', rate: 1.5 },
 ];
 
-export default function Learn({ clips, jobId, apiUrl, fullVideoUrl, challengeId, currentUserId, currentDisplayName, onStartChallenge, onBack }: Props) {
+export default function Learn({ clips, jobId, apiUrl, fullVideoUrl, originalVideoUrl, challengeId, currentUserId, currentDisplayName, onStartChallenge, onBack }: Props) {
   const [currentIndex, setCurrentIndex] = useState(0);
   const [isPlaying, setIsPlaying] = useState(false);
   const [playbackRate, setPlaybackRate] = useState(1.0);
@@ -49,6 +50,8 @@ export default function Learn({ clips, jobId, apiUrl, fullVideoUrl, challengeId,
   // 클립이 2개 이상일 때만 미리보기 단계 노출 (단일 클립은 미리보기 = 본영상이라 중복)
   const [phase, setPhase] = useState<'preview' | 'practice'>(clips.length > 1 ? 'preview' : 'practice');
   const previewVideoRef = useRef<HTMLVideoElement>(null);
+  // 미리보기에서 스틱맨 표시 여부 토글 (원본 영상 URL 있을 때만 동작)
+  const [showStickman, setShowStickman] = useState(true);
 
   // 댓글 상태
   const [comments, setComments] = useState<Comment[]>([]);
@@ -108,7 +111,8 @@ export default function Learn({ clips, jobId, apiUrl, fullVideoUrl, challengeId,
   };
 
   if (phase === 'preview') {
-    const previewUrl = fullVideoUrl ?? `/full-video/${jobId}`;
+    const skeletonUrl = fullVideoUrl ?? `/full-video/${jobId}`;
+    const previewUrl = (showStickman || !originalVideoUrl) ? skeletonUrl : originalVideoUrl;
     return (
       <div className="w-full h-screen bg-zinc-950 flex flex-col items-center justify-between py-10 px-4">
         <div className="w-full flex justify-between items-center mb-6">
@@ -137,6 +141,7 @@ export default function Learn({ clips, jobId, apiUrl, fullVideoUrl, challengeId,
 
         <div className="relative w-full max-w-sm aspect-[9/16] bg-black rounded-3xl overflow-hidden shadow-2xl flex-1 mb-8">
           <video
+            key={previewUrl}
             ref={previewVideoRef}
             src={resolveUrl(apiUrl, previewUrl)}
             className="w-full h-full object-contain bg-black"
@@ -150,6 +155,22 @@ export default function Learn({ clips, jobId, apiUrl, fullVideoUrl, challengeId,
                 <Play size={40} className="text-white fill-white ml-1" />
               </div>
             </div>
+          )}
+          {/* 스틱맨 표시 토글 (원본 영상 URL 있을 때만 활성) */}
+          {originalVideoUrl && (
+            <button
+              onClick={(e) => { e.stopPropagation(); setShowStickman(s => !s); }}
+              className={`absolute top-3 right-3 px-3 py-1.5 rounded-full text-xs font-black backdrop-blur-md transition-all flex items-center gap-1.5 ${
+                showStickman
+                  ? 'bg-[#7C5CFC]/80 text-white'
+                  : 'bg-black/60 text-white/70 hover:text-white'
+              }`}
+            >
+              <span className={`w-3 h-3 rounded-sm border-2 flex items-center justify-center ${showStickman ? 'bg-white border-white' : 'border-white/50'}`}>
+                {showStickman && <span className="w-1.5 h-1.5 bg-[#7C5CFC] rounded-sm" />}
+              </span>
+              스틱맨
+            </button>
           )}
         </div>
 
