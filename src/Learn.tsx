@@ -91,6 +91,11 @@ export default function Learn({ clips, jobId, apiUrl, fullVideoUrl, challengeId,
     if (previewVideoRef.current) previewVideoRef.current.playbackRate = playbackRate;
   }, [playbackRate, phase]);
 
+  // 연습 모드 비디오의 배속 적용 (early return 위에 있어야 hook 순서 일관됨)
+  useEffect(() => {
+    if (videoRef.current) videoRef.current.playbackRate = playbackRate;
+  }, [playbackRate]);
+
   const togglePreviewPlay = () => {
     if (!previewVideoRef.current) return;
     if (isPlaying) {
@@ -235,12 +240,6 @@ export default function Learn({ clips, jobId, apiUrl, fullVideoUrl, challengeId,
   const totalSteps = totalClips + 1; 
   const isFinalStep = currentIndex === totalClips;
   const current = !isFinalStep ? clips[currentIndex] : null;
-
-  useEffect(() => {
-    if (videoRef.current) {
-      videoRef.current.playbackRate = playbackRate;
-    }
-  }, [playbackRate]);
 
   const handleNext = () => {
     if (currentIndex < totalSteps - 1) {
