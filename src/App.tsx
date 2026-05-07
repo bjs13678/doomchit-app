@@ -9,7 +9,8 @@ createUserWithEmailAndPassword, signInWithEmailAndPassword, signOut, updateProfi
 GoogleAuthProvider, signInWithPopup
 } from 'firebase/auth'; import {
 ref as storageRef, uploadBytes, getDownloadURL
-} from 'firebase/storage'; import { db, auth, storage } from './firebase'; import 
+} from 'firebase/storage'; import { db, auth, storage } from './firebase';
+import { LineChart, Line, XAxis, YAxis, Tooltip, ResponsiveContainer } from 'recharts'; import 
 './index.css'; import './i18n'; import Learn from './Learn'; import 
 ChallengeComponent from './Challenge';
 
@@ -738,6 +739,8 @@ export default function App() {
   const [followingIds, setFollowingIds] = useState<Set<string>>(new Set());
   const [followerCount, setFollowerCount] = useState(0);
   const [followingCount, setFollowingCount] = useState(0);
+  // 내 진행도 (지난 30일 도전 점수 추이)
+  const [mySubmissions, setMySubmissions] = useState<{ score: number; ts: number; challengeTitle: string }[]>([]);
   const [seedBusy, setSeedBusy] = useState<'idle' | 'adding' | 'removing'>('idle');
 
   const SEED_USERS = [
@@ -930,6 +933,24 @@ export default function App() {
     if (!userProfile || activeTab !== 'profile') return;
     const q = query(collection(db, 'challenges'), where('creatorId', '==', userProfile.id), orderBy('timestamp', 'desc'));
     return onSnapshot(q, snap => setMyChallenges(snap.docs.map(d => ({ id: d.id, ...d.data() } as ChallengeData))));
+  }, [userProfile, activeTab]);
+
+  // 내 도전 기록 (지난 30일 진행도 차트용)
+  useEffect(() => {
+    if (!userProfile || activeTab !== 'profile') return;
+    const cutoff = Date.now() - 30 * 86400 * 1000;
+    const q = query(collection(db, 'submissions'), where('userId', '==', userProfile.id));
+    return onSnapshot(q, snap => {
+      const data = snap.docs
+        .map(d => {
+          const x = d.data() as any;
+          const ts = x.timestamp?.toMillis ? x.timestamp.toMillis() : 0;
+          return { score: x.score || 0, ts, challengeTitle: x.challengeTitle || '' };
+        })
+        .filter(x => x.ts >= cutoff)
+        .sort((a, b) => a.ts - b.ts);
+      setMySubmissions(data);
+    });
   }, [userProfile, activeTab]);
 
   // 내가 팔로우하는 사람들
@@ -1387,6 +1408,45 @@ export default function App() {
                     <Settings size={22} />
                   </button>
                 </div>
+
+                {/* 내 진행도 차트 (지난 30일 도전 점수 추이) */}
+                {mySubmissions.length > 0 && (() => {
+                  const chartData = mySubmissions.map((s, i) => ({
+                    idx: i + 1,
+                    date: new Date(s.ts).toLocaleDateString('ko-KR', { month: 'short', day: 'numeric' }),
+                    score: s.score,
+                    title: s.challengeTitle,
+                  }));
+                  const avg = Math.round(mySubmissions.reduce((sum, s) => sum + s.score, 0) / mySubmissions.length);
+                  const best = Math.max(...mySubmissions.map(s => s.score));
+                  return (
+                    <div className="bg-gray-50 dark:bg-gray-900 rounded-2xl p-5 mb-5">
+                      <div className="flex items-center justify-between mb-3">
+                        <h3 className="font-black text-sm flex items-center gap-2">📈 30일 진행도</h3>
+                        <div className="flex gap-3 text-xs">
+                          <span className="font-bold text-gray-500">평균 <span className="text-[#7C5CFC]">{avg}점</span></span>
+                          <span className="font-bold text-gray-500">최고 <span className="text-[#7C5CFC]">{best}점</span></span>
+                          <span className="font-bold text-gray-500">{mySubmissions.length}회</span>
+                        </div>
+                      </div>
+                      <div className="h-32">
+                        <ResponsiveContainer width="100%" height="100%">
+                          <LineChart data={chartData}>
+                            <XAxis dataKey="date" tick={{ fontSize: 10 }} />
+                            <YAxis domain={[0, 100]} tick={{ fontSize: 10 }} />
+                            <Tooltip
+                              contentStyle={{ background: 'white', border: '1px solid #ccc', borderRadius: 8, fontSize: 12 }}
+                              formatter={(v: any) => [`${v}점`, '점수']}
+                              labelFormatter={(_, p) => p?.[0]?.payload?.title || ''}
+                            />
+                            <Line type="monotone" dataKey="score" stroke="#7C5CFC" strokeWidth={2} dot={{ r: 3 }} />
+                          </LineChart>
+                        </ResponsiveContainer>
+                      </div>
+                    </div>
+                  );
+                })()}
+
                 {myChallenges.length === 0 ? (
                   <div className="flex flex-col items-center justify-center mt-12 gap-4 text-gray-400">
                     <Upload size={48} strokeWidth={1} />

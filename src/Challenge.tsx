@@ -12,6 +12,8 @@ interface ChallengeRankRow { userId: string; displayName: string; max: number; }
 interface TimelinePoint { time: number; score: number; }
 interface WeakWindow { start: number; end: number; avg: number; }
 interface AIImprovement { area: string; issue: string; tip: string; }
+interface JointAngleSummary { user: number; target: number; diff: number; } // 각도 평균(도)
+type JointAngleData = Record<string, JointAngleSummary>;
 interface AIFeedback {
   summary: string;
   strengths: string[];
@@ -19,6 +21,37 @@ interface AIFeedback {
   drillRecommendation: string;
   encouragement: string;
 }
+
+// 세 점 사이 각도 (도) — p2가 꼭짓점 (관절)
+const calcAngle = (p1: any, p2: any, p3: any): number => {
+  if (!p1 || !p2 || !p3) return 0;
+  const v1x = p1.x - p2.x, v1y = p1.y - p2.y;
+  const v2x = p3.x - p2.x, v2y = p3.y - p2.y;
+  const dot = v1x * v2x + v1y * v2y;
+  const m1 = Math.sqrt(v1x * v1x + v1y * v1y);
+  const m2 = Math.sqrt(v2x * v2x + v2y * v2y);
+  if (m1 < 1e-6 || m2 < 1e-6) return 0;
+  const cos = Math.max(-1, Math.min(1, dot / (m1 * m2)));
+  return Math.acos(cos) * 180 / Math.PI;
+};
+
+// 관절 각도 4개 (좌/우 팔꿈치, 좌/우 무릎). MediaPipe Pose 인덱스 기준.
+const computeJointAngles = (lm: any) => {
+  if (!lm || lm.length < 29) return null;
+  return {
+    rightElbow: calcAngle(lm[12], lm[14], lm[16]),  // 어깨-팔꿈치-손목
+    leftElbow:  calcAngle(lm[11], lm[13], lm[15]),
+    rightKnee:  calcAngle(lm[24], lm[26], lm[28]),  // 엉덩이-무릎-발목
+    leftKnee:   calcAngle(lm[23], lm[25], lm[27]),
+  };
+};
+
+const JOINT_LABELS_KR: Record<string, string> = {
+  rightElbow: '오른팔 굽힘',
+  leftElbow: '왼팔 굽힘',
+  rightKnee: '오른다리 굽힘',
+  leftKnee: '왼다리 굽힘',
+};
 
 const calculateScore = (targetLandmarks: any, userLandmarks: any) => {
   if (!userLandmarks || userLandmarks.length === 0) return 0;
@@ -132,6 +165,14 @@ export default function ChallengeComponent({
   const timelineRef = useRef<TimelinePoint[]>([]);
   const playStartTimeRef = useRef<number>(0);
   const lastTimelinePushRef = useRef<number>(0);
+  // 관절 각도 누적 (각 관절별 user/target 합산 + 카운트)
+  const jointAccumRef = useRef<Record<string, { uSum: number; tSum: number; count: number }>>({
+    rightElbow: { uSum: 0, tSum: 0, count: 0 },
+    leftElbow:  { uSum: 0, tSum: 0, count: 0 },
+    rightKnee:  { uSum: 0, tSum: 0, count: 0 },
+    leftKnee:   { uSum: 0, tSum: 0, count: 0 },
+  });
+  const [jointAngles, setJointAngles] = useState<JointAngleData | null>(null);
 
   // AI 튜터링
   const [aiBusy, setAiBusy] = useState(false);
@@ -186,6 +227,7 @@ export default function ChallengeComponent({
           musicTitle: challengeArtist || null,
           score: finalScore,
           timeline: timeline,
+          jointAngles: jointAngles,
           weakWindows: weakWindows,
         }),
       });
@@ -262,6 +304,21 @@ export default function ChallengeComponent({
             timelineRef.current.push({ time: Number(elapsed.toFixed(2)), score: currentScore });
             lastTimelinePushRef.current = elapsed;
           }
+          // 관절 각도 누적 (사용자 영상은 좌우 반전이라 user x를 1-x로 mirror)
+          const userMirrored = results.poseLandmarks.map((p: any) => ({ ...p, x: 1 - p.x }));
+          const userAng = computeJointAngles(userMirrored);
+          const targetAng = computeJointAngles(targetLandmarksRef.current);
+          if (userAng && targetAng) {
+            for (const key of Object.keys(userAng) as Array<keyof typeof userAng>) {
+              const u = userAng[key], t = targetAng[key];
+              if (u > 0 && t > 0) {
+                const acc = jointAccumRef.current[key];
+                acc.uSum += u;
+                acc.tSum += t;
+                acc.count += 1;
+              }
+            }
+          }
         }
       } else {
         if (isPlayingRef.current) {
@@ -328,6 +385,13 @@ export default function ChallengeComponent({
           timelineRef.current = [];
           lastTimelinePushRef.current = 0;
           playStartTimeRef.current = performance.now();
+          // 관절 각도 누적 초기화
+          jointAccumRef.current = {
+            rightElbow: { uSum: 0, tSum: 0, count: 0 },
+            leftElbow:  { uSum: 0, tSum: 0, count: 0 },
+            rightKnee:  { uSum: 0, tSum: 0, count: 0 },
+            leftKnee:   { uSum: 0, tSum: 0, count: 0 },
+          };
         }
       }
     }, 1000);
@@ -345,6 +409,20 @@ export default function ChallengeComponent({
     setFinalScore(avgScore);
     setTimeline([...timelineRef.current]);
     setWeakWindows(detectWeakWindows(timelineRef.current));
+    // 관절 각도 평균 계산
+    const ja: JointAngleData = {};
+    for (const [key, acc] of Object.entries(jointAccumRef.current)) {
+      if (acc.count > 0) {
+        const u = acc.uSum / acc.count;
+        const t = acc.tSum / acc.count;
+        ja[JOINT_LABELS_KR[key] || key] = {
+          user: Number(u.toFixed(1)),
+          target: Number(t.toFixed(1)),
+          diff: Number((u - t).toFixed(1)),
+        };
+      }
+    }
+    setJointAngles(Object.keys(ja).length > 0 ? ja : null);
     setAiFeedback(null); // 매 도전마다 AI 분석 초기화
     onComplete?.(avgScore);
   };
@@ -475,6 +553,35 @@ export default function ChallengeComponent({
               {!userIsPremium && (userTickets ?? 0) < 1 && !aiFeedback && (
                 <p className="text-white/50 text-xs font-bold mt-2 text-center">티켓이 부족합니다 — 헤더 🎟️ 클릭해서 충전</p>
               )}
+            </div>
+          )}
+
+          {/* 관절 각도 분석 (무료) */}
+          {jointAngles && (
+            <div className="w-full max-w-md bg-white/5 rounded-[2rem] p-6 border border-white/10 mb-4">
+              <h3 className="font-black text-white mb-3 flex items-center gap-2">
+                💪 부위별 자세 분석
+              </h3>
+              <div className="space-y-2">
+                {Object.entries(jointAngles).map(([name, d]) => {
+                  const absDiff = Math.abs(d.diff);
+                  const status = absDiff < 10 ? '완벽' : absDiff < 25 ? '양호' : '편차 큼';
+                  const color = absDiff < 10 ? 'text-green-400' : absDiff < 25 ? 'text-yellow-400' : 'text-red-400';
+                  const direction = d.diff > 0 ? '더 펴짐' : d.diff < 0 ? '더 굽힘' : '동일';
+                  return (
+                    <div key={name} className="flex items-center justify-between bg-white/5 rounded-xl p-3">
+                      <div className="flex items-center gap-3 flex-1 min-w-0">
+                        <span className="text-white text-sm font-bold truncate">{name}</span>
+                        <span className={`text-xs font-black ${color}`}>{status}</span>
+                      </div>
+                      <div className="text-right">
+                        <p className="text-xs text-white/60">{d.user.toFixed(0)}° vs {d.target.toFixed(0)}°</p>
+                        <p className={`text-xs font-bold ${color}`}>{d.diff > 0 ? '+' : ''}{d.diff.toFixed(1)}° ({direction})</p>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
             </div>
           )}
 
