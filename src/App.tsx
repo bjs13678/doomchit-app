@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef } from 'react'; import { motion, 
 AnimatePresence } from 'motion/react'; import { Trophy, User, Play, Plus,
 Upload, Loader2, CheckCircle, Palette, UserCheck, Search, ChevronUp,
-ChevronDown, Minus, LogIn, Settings, LogOut, X, Trash2, Heart, Camera } from 'lucide-react'; import { doc, getDoc, setDoc,
+ChevronDown, Minus, LogIn, Settings, LogOut, X, Trash2, Heart, Camera, Ticket, Gem, Copy as CopyIcon, Check } from 'lucide-react'; import { doc, getDoc, setDoc,
 collection, addDoc, serverTimestamp, onSnapshot, query, orderBy, limit, where, getDocs, deleteDoc }
 from 'firebase/firestore'; import { onAuthStateChanged } from 
 'firebase/auth'; import {
@@ -29,7 +29,32 @@ const PRESET_COLORS = [
   { name: '흰색', hex: '#FFFFFF' },
 ];
 
-interface UserProfile { id: string; displayName: string; photoURL?: string; level: number; exp: number; badges: string[]; }
+interface UserProfile {
+  id: string;
+  displayName: string;
+  photoURL?: string;
+  level: number;
+  exp: number;
+  badges: string[];
+  tickets?: number;
+  isPremium?: boolean;
+  premiumUntil?: any; // Timestamp
+  referralCode?: string;
+  referredBy?: string | null;
+}
+
+// 6자리 영숫자 초대 코드 (대문자, 헷갈리는 문자 제거)
+const generateReferralCode = (): string => {
+  const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+  return Array.from({ length: 6 }, () => chars[Math.floor(Math.random() * chars.length)]).join('');
+};
+
+// premium 활성 여부 (만료일 비교)
+const isPremiumActive = (profile: UserProfile | null): boolean => {
+  if (!profile?.isPremium || !profile.premiumUntil) return false;
+  const until = profile.premiumUntil.toDate ? profile.premiumUntil.toDate() : new Date(profile.premiumUntil);
+  return until.getTime() > Date.now();
+};
 interface Clip { index: number; start_frame: number; end_frame: number; duration: number; video_url: string; thumb_url: string; }
 interface Track { id: string; title: string; artist: string; albumArt: string | null; previewUrl: string | null; }
 interface ChallengeData { id: string; title: string; creatorName: string; creatorId: string; jobId: string; clips: Clip[]; difficulty: string; likeCount: number; participantCount: number; timestamp: any; music?: Track | null; fullVideoUrl?: string | null; originalVideoUrl?: string | null; }
@@ -660,6 +685,56 @@ export default function App() {
   const [myChallenges, setMyChallenges] = useState<ChallengeData[]>([]);
   const [analysis, setAnalysis] = useState<AnalysisState | null>(null);
   const [showSettings, setShowSettings] = useState(false);
+  const [showChargeSheet, setShowChargeSheet] = useState(false);
+  const [chargeBusy, setChargeBusy] = useState(false);
+  const [referralCopied, setReferralCopied] = useState(false);
+
+  // Mock 티켓 충전 (실제 결제 대신 즉시 잔액 증가)
+  const handleChargeTickets = async (amount: number, _price: number) => {
+    if (!userProfile) return;
+    setChargeBusy(true);
+    try {
+      const newBalance = (userProfile.tickets ?? 0) + amount;
+      await setDoc(doc(db, 'users', userProfile.id), { tickets: newBalance }, { merge: true });
+      setUserProfile({ ...userProfile, tickets: newBalance });
+    } catch (err) {
+      alert('충전 실패: ' + err);
+    } finally {
+      setChargeBusy(false);
+    }
+  };
+
+  // Mock 구독 (월간/연간)
+  const handleSubscribe = async (plan: 'monthly' | 'yearly') => {
+    if (!userProfile) return;
+    setChargeBusy(true);
+    try {
+      const days = plan === 'monthly' ? 30 : 365;
+      const until = new Date(Date.now() + days * 86400 * 1000);
+      await setDoc(doc(db, 'users', userProfile.id), {
+        isPremium: true,
+        premiumUntil: until,
+      }, { merge: true });
+      setUserProfile({ ...userProfile, isPremium: true, premiumUntil: until });
+      alert(`✅ ${plan === 'monthly' ? '월간' : '연간'} 구독 활성화 (${days}일)`);
+    } catch (err) {
+      alert('구독 실패: ' + err);
+    } finally {
+      setChargeBusy(false);
+    }
+  };
+
+  const copyReferralLink = async () => {
+    if (!userProfile?.referralCode) return;
+    const url = `${window.location.origin}?ref=${userProfile.referralCode}`;
+    try {
+      await navigator.clipboard.writeText(url);
+      setReferralCopied(true);
+      setTimeout(() => setReferralCopied(false), 2000);
+    } catch {
+      alert('복사 실패. 직접 복사: ' + url);
+    }
+  };
   const [followingIds, setFollowingIds] = useState<Set<string>>(new Set());
   const [followerCount, setFollowerCount] = useState(0);
   const [followingCount, setFollowingCount] = useState(0);
@@ -811,12 +886,27 @@ export default function App() {
         if (!snap.empty) {
           const d = snap.docs[0];
           const data: any = d.data();
+          // 옛 사용자 호환: 누락된 BM 필드 자동 채워주기
+          const updates: any = {};
+          if (data.tickets === undefined) updates.tickets = 3;
+          if (!data.referralCode) updates.referralCode = generateReferralCode();
+          if (data.isPremium === undefined) updates.isPremium = false;
+          if (Object.keys(updates).length > 0) {
+            try { await setDoc(d.ref, updates, { merge: true }); } catch {}
+            Object.assign(data, updates);
+          }
           setUserProfile({
             id: d.id,
             displayName: data.displayName || d.id,
+            photoURL: data.photoURL,
             level: data.level ?? 1,
             exp: data.exp ?? 0,
             badges: data.badges ?? [],
+            tickets: data.tickets ?? 0,
+            isPremium: data.isPremium ?? false,
+            premiumUntil: data.premiumUntil ?? null,
+            referralCode: data.referralCode,
+            referredBy: data.referredBy ?? null,
           });
           setIsLoggedIn(true);
           setNeedsUsername(false);
@@ -936,6 +1026,25 @@ export default function App() {
   const [loginPassword, setLoginPassword] = useState('');
   const [authMode, setAuthMode] = useState<'login' | 'signup'>('login');
   const [needsUsername, setNeedsUsername] = useState(false);
+  // URL의 ?ref= 파라미터 한 번 읽기 (페이지 진입 시 캡처)
+  const [referralFromUrl] = useState<string | null>(() => {
+    try { return new URLSearchParams(window.location.search).get('ref'); }
+    catch { return null; }
+  });
+
+  // 친구 초대로 가입한 사람: 초대자에게 티켓 +1 지급
+  const rewardInviter = async (inviterCode: string) => {
+    if (!inviterCode) return;
+    try {
+      const q = query(collection(db, 'users'), where('referralCode', '==', inviterCode), limit(1));
+      const snap = await getDocs(q);
+      if (!snap.empty) {
+        const inviterDoc = snap.docs[0];
+        const cur = (inviterDoc.data() as any).tickets ?? 0;
+        await setDoc(inviterDoc.ref, { tickets: cur + 1 }, { merge: true });
+      }
+    } catch (err) { console.warn('rewardInviter failed', err); }
+  };
   const [usernamePickerHandle, setUsernamePickerHandle] = useState('');
   const [usernamePickerError, setUsernamePickerError] = useState('');
   const [usernamePickerBusy, setUsernamePickerBusy] = useState(false);
@@ -982,15 +1091,25 @@ export default function App() {
         setUsernamePickerBusy(false);
         return;
       }
+      const myReferralCode = generateReferralCode();
       await setDoc(ref, {
         uid: user.uid,
         displayName: handle,
         level: 1, exp: 0, badges: [],
+        tickets: 3,                              // 회원가입 보너스
+        isPremium: false,
+        referralCode: myReferralCode,
+        referredBy: referralFromUrl,             // 누구 초대로 왔나
         createdAt: serverTimestamp(),
       });
       try { await updateProfile(user, { displayName: handle }); } catch {}
+      // 초대자에게 +1 티켓 지급
+      if (referralFromUrl) await rewardInviter(referralFromUrl);
       // 즉시 프로필 세팅 (onAuthStateChanged가 다시 안 도니까)
-      setUserProfile({ id: handle, displayName: handle, level: 1, exp: 0, badges: [] });
+      setUserProfile({
+        id: handle, displayName: handle, level: 1, exp: 0, badges: [],
+        tickets: 3, isPremium: false, referralCode: myReferralCode, referredBy: referralFromUrl,
+      });
       setIsLoggedIn(true);
       setNeedsUsername(false);
     } catch (err) {
@@ -1029,13 +1148,20 @@ export default function App() {
         // 2) Firebase Auth 가입
         const cred = await createUserWithEmailAndPassword(auth, email, password);
         await updateProfile(cred.user, { displayName: handle });
-        // 3) Firestore users 도큐 생성
+        // 3) Firestore users 도큐 생성 (BM 필드 포함)
+        const myReferralCode = generateReferralCode();
         await setDoc(doc(db, 'users', handle), {
           uid: cred.user.uid,
           displayName: handle,
           level: 1, exp: 0, badges: [],
+          tickets: 3,                              // 회원가입 보너스
+          isPremium: false,
+          referralCode: myReferralCode,
+          referredBy: referralFromUrl,             // 누구 초대로 왔나
           createdAt: serverTimestamp(),
         });
+        // 초대자에게 +1 티켓 지급
+        if (referralFromUrl) await rewardInviter(referralFromUrl);
         // onAuthStateChanged가 displayName으로 프로필 로드
       } else {
         await signInWithEmailAndPassword(auth, email, password);
@@ -1184,8 +1310,23 @@ export default function App() {
 
   return (
     <div className={`min-h-screen bg-white dark:bg-black text-black dark:text-white ${MAIN_FONT}`}>
-      <header className="fixed top-0 left-0 w-full h-16 px-6 flex items-center bg-white/80 dark:bg-black/80 backdrop-blur-md z-[100] border-b border-gray-100 dark:border-gray-900">
+      <header className="fixed top-0 left-0 w-full h-16 px-6 flex items-center justify-between bg-white/80 dark:bg-black/80 backdrop-blur-md z-[100] border-b border-gray-100 dark:border-gray-900">
         <h1 className={`${LOGO_FONT} text-3xl text-[#7C5CFC] dark:text-[#D8D8EC]`}>둠칫</h1>
+        {userProfile && (
+          <button
+            onClick={() => setShowChargeSheet(true)}
+            className="flex items-center gap-2 px-3 py-1.5 rounded-full bg-gradient-to-r from-[#7C5CFC]/10 to-[#D8D8EC]/30 hover:from-[#7C5CFC]/20 hover:to-[#D8D8EC]/40 transition-all"
+          >
+            {isPremiumActive(userProfile) ? (
+              <Gem size={16} className="text-[#7C5CFC]" />
+            ) : (
+              <Ticket size={16} className="text-[#7C5CFC]" />
+            )}
+            <span className="text-sm font-black text-[#7C5CFC]">
+              {isPremiumActive(userProfile) ? 'PREMIUM' : (userProfile.tickets ?? 0)}
+            </span>
+          </button>
+        )}
       </header>
 
       <main className="pt-16 pb-24 max-w-md mx-auto min-h-screen relative shadow-2xl bg-white dark:bg-black">
@@ -1349,6 +1490,125 @@ export default function App() {
             />
           </div>
         )}
+
+        {/* 티켓 충전 바텀 시트 */}
+        <AnimatePresence>
+          {showChargeSheet && userProfile && (
+            <>
+              <motion.div
+                initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}
+                onClick={() => setShowChargeSheet(false)}
+                className="fixed inset-0 z-[300] bg-black/50 backdrop-blur-sm"
+              />
+              <motion.div
+                initial={{ y: '100%' }} animate={{ y: 0 }} exit={{ y: '100%' }}
+                transition={{ type: 'spring', damping: 30, stiffness: 300 }}
+                className="fixed bottom-0 left-0 right-0 max-w-md mx-auto z-[301] bg-white dark:bg-gray-950 rounded-t-3xl shadow-2xl pb-safe max-h-[85vh] overflow-y-auto"
+              >
+                <div className="flex items-center justify-between p-5 border-b border-gray-100 dark:border-gray-900 sticky top-0 bg-white dark:bg-gray-950 z-10">
+                  <h3 className="text-lg font-black flex items-center gap-2">
+                    <Ticket size={20} className="text-[#7C5CFC]" /> 티켓 / 구독
+                  </h3>
+                  <button onClick={() => setShowChargeSheet(false)} className="p-1 text-gray-400 hover:text-gray-600">
+                    <X size={20} />
+                  </button>
+                </div>
+
+                <div className="p-5 space-y-5">
+                  {/* 현재 잔액 */}
+                  <div className="bg-gradient-to-br from-[#7C5CFC] to-[#5C3FCC] rounded-2xl p-5 text-white">
+                    <p className="text-xs font-bold opacity-80 mb-1">현재 잔액</p>
+                    <div className="flex items-end gap-2">
+                      <span className="text-4xl font-black">{userProfile.tickets ?? 0}</span>
+                      <span className="text-lg font-bold opacity-80">티켓</span>
+                    </div>
+                    {isPremiumActive(userProfile) && userProfile.premiumUntil && (
+                      <div className="mt-3 flex items-center gap-2 text-sm">
+                        <Gem size={14} />
+                        <span className="font-bold">
+                          PREMIUM ({(userProfile.premiumUntil.toDate ? userProfile.premiumUntil.toDate() : new Date(userProfile.premiumUntil)).toLocaleDateString('ko-KR')} 까지)
+                        </span>
+                      </div>
+                    )}
+                  </div>
+
+                  {/* 티켓 충전 */}
+                  <div>
+                    <p className="text-xs font-bold text-gray-400 mb-2 px-1">🎟️ 티켓 충전 (1 티켓 = AI 튜터링 1회)</p>
+                    <div className="grid grid-cols-2 gap-2">
+                      {[
+                        { tickets: 5, price: 2500 },
+                        { tickets: 10, price: 4900 },
+                        { tickets: 20, price: 9900 },
+                        { tickets: 55, price: 24900, badge: 'BEST' },
+                      ].map(opt => (
+                        <button
+                          key={opt.tickets}
+                          onClick={() => handleChargeTickets(opt.tickets, opt.price)}
+                          disabled={chargeBusy}
+                          className="relative bg-gray-50 dark:bg-gray-900 hover:bg-[#7C5CFC]/10 border-2 border-transparent hover:border-[#7C5CFC] rounded-2xl p-4 transition-all disabled:opacity-50"
+                        >
+                          {opt.badge && (
+                            <span className="absolute -top-2 -right-2 bg-yellow-400 text-black text-[10px] font-black px-2 py-0.5 rounded-full">{opt.badge}</span>
+                          )}
+                          <p className="text-2xl font-black">{opt.tickets} <span className="text-sm">티켓</span></p>
+                          <p className="text-sm font-bold text-gray-500">₩{opt.price.toLocaleString()}</p>
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+
+                  {/* 구독 */}
+                  <div>
+                    <p className="text-xs font-bold text-gray-400 mb-2 px-1">💎 PREMIUM 구독 (AI 튜터링 무제한 + 광고 X)</p>
+                    <div className="space-y-2">
+                      <button
+                        onClick={() => handleSubscribe('monthly')}
+                        disabled={chargeBusy}
+                        className="w-full bg-gray-50 dark:bg-gray-900 hover:bg-[#7C5CFC]/10 border-2 border-transparent hover:border-[#7C5CFC] rounded-2xl p-4 transition-all disabled:opacity-50 flex justify-between items-center"
+                      >
+                        <span className="font-black">월간 구독</span>
+                        <span className="font-bold text-[#7C5CFC]">₩3,900 / 월</span>
+                      </button>
+                      <button
+                        onClick={() => handleSubscribe('yearly')}
+                        disabled={chargeBusy}
+                        className="w-full bg-gradient-to-r from-[#7C5CFC]/10 to-[#D8D8EC]/30 hover:from-[#7C5CFC]/20 border-2 border-[#7C5CFC] rounded-2xl p-4 transition-all disabled:opacity-50 flex justify-between items-center"
+                      >
+                        <div className="text-left">
+                          <p className="font-black">연간 구독 <span className="text-xs bg-yellow-400 text-black px-1.5 py-0.5 rounded ml-1">-33%</span></p>
+                          <p className="text-xs font-bold text-gray-500">월 ₩3,250 ÷ 12개월</p>
+                        </div>
+                        <span className="font-bold text-[#7C5CFC]">₩39,000 / 년</span>
+                      </button>
+                    </div>
+                  </div>
+
+                  {/* 친구 초대 */}
+                  <div className="border-t border-gray-100 dark:border-gray-900 pt-5">
+                    <p className="text-xs font-bold text-gray-400 mb-2 px-1">🤝 친구 초대 (가입 시 양쪽 +1 티켓)</p>
+                    <button
+                      onClick={copyReferralLink}
+                      className="w-full bg-gray-50 dark:bg-gray-900 hover:bg-gray-100 dark:hover:bg-gray-800 rounded-2xl p-4 transition-all flex items-center justify-between gap-3"
+                    >
+                      <div className="text-left flex-1 min-w-0">
+                        <p className="text-xs font-bold text-gray-500">내 초대 코드</p>
+                        <p className="font-black truncate">{userProfile.referralCode || '...'}</p>
+                      </div>
+                      {referralCopied
+                        ? <span className="flex items-center gap-1 text-green-500 text-sm font-bold"><Check size={16} /> 복사됨!</span>
+                        : <span className="flex items-center gap-1 text-[#7C5CFC] text-sm font-bold"><CopyIcon size={16} /> 링크 복사</span>}
+                    </button>
+                  </div>
+
+                  <p className="text-[10px] text-gray-400 text-center pt-2">
+                    * MVP 단계: 결제 시 즉시 충전됩니다 (실제 결제 X)
+                  </p>
+                </div>
+              </motion.div>
+            </>
+          )}
+        </AnimatePresence>
 
         {/* 설정 바텀 시트 */}
         <AnimatePresence>
