@@ -1469,6 +1469,23 @@ export default function App() {
               challengeId={selectedChallenge?.id}
               challengeMusicId={selectedChallenge?.music?.id}
               currentUserId={userProfile?.id}
+              apiUrl={API_URL}
+              userTickets={userProfile?.tickets ?? 0}
+              userIsPremium={isPremiumActive(userProfile)}
+              onAITutorSpend={async () => {
+                if (!userProfile) return false;
+                if (isPremiumActive(userProfile)) return true; // 구독자는 무제한
+                if ((userProfile.tickets ?? 0) < 1) return false;
+                try {
+                  const newBalance = (userProfile.tickets ?? 0) - 1;
+                  await setDoc(doc(db, 'users', userProfile.id), { tickets: newBalance }, { merge: true });
+                  setUserProfile({ ...userProfile, tickets: newBalance });
+                  return true;
+                } catch (err) {
+                  console.warn('ticket spend failed', err);
+                  return false;
+                }
+              }}
               onBack={() => { setChallengeClipUrl(''); setIsLearning(true); }}
               onComplete={async (score) => {
                 if (!userProfile || !selectedChallenge) return;

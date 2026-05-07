@@ -3,11 +3,22 @@ import Webcam from 'react-webcam';
 import { Pose, POSE_CONNECTIONS } from '@mediapipe/pose';
 import { Camera } from '@mediapipe/camera_utils';
 import { drawConnectors, drawLandmarks } from '@mediapipe/drawing_utils';
-import { Play, RefreshCw, ArrowLeft, Smartphone, Trophy, User } from 'lucide-react';
-import { collection, onSnapshot, query, where } from 'firebase/firestore';
+import { Play, RefreshCw, ArrowLeft, Smartphone, Trophy, User, Sparkles, Loader2, X, TrendingUp } from 'lucide-react';
+import { collection, onSnapshot, query, where, doc, setDoc } from 'firebase/firestore';
 import { db } from './firebase';
+import { LineChart, Line, XAxis, YAxis, Tooltip, ResponsiveContainer, ReferenceArea } from 'recharts';
 
 interface ChallengeRankRow { userId: string; displayName: string; max: number; }
+interface TimelinePoint { time: number; score: number; }
+interface WeakWindow { start: number; end: number; avg: number; }
+interface AIImprovement { area: string; issue: string; tip: string; }
+interface AIFeedback {
+  summary: string;
+  strengths: string[];
+  improvements: AIImprovement[];
+  drillRecommendation: string;
+  encouragement: string;
+}
 
 const calculateScore = (targetLandmarks: any, userLandmarks: any) => {
   if (!userLandmarks || userLandmarks.length === 0) return 0;
@@ -52,6 +63,11 @@ interface Props {
   challengeId?: string;     // 이 챌린지 ID (음악 없는 경우 리더보드 필터)
   challengeMusicId?: string; // 챌린지의 음악 ID (있으면 곡 단위로 리더보드 집계)
   currentUserId?: string;   // 본인 강조용
+  // AI 튜터링용
+  apiUrl?: string;
+  userTickets?: number;
+  userIsPremium?: boolean;
+  onAITutorSpend?: () => Promise<boolean>; // 티켓 차감 (premium이면 차감 X). 성공 시 true
   onBack: () => void;
   onComplete?: (score: number) => void; // 챌린지 완료 시 점수 콜백
 }
@@ -65,6 +81,10 @@ export default function ChallengeComponent({
   challengeId,
   challengeMusicId,
   currentUserId,
+  apiUrl,
+  userTickets,
+  userIsPremium,
+  onAITutorSpend,
   onBack,
   onComplete
 }: Props) {
@@ -107,6 +127,79 @@ export default function ChallengeComponent({
   
   const isPlayingRef = useRef(false);
   const scoreDataRef = useRef({ sum: 0, count: 0 });
+  const timelineRef = useRef<TimelinePoint[]>([]);
+  const playStartTimeRef = useRef<number>(0);
+  const lastTimelinePushRef = useRef<number>(0);
+
+  // AI 튜터링
+  const [aiBusy, setAiBusy] = useState(false);
+  const [aiFeedback, setAiFeedback] = useState<AIFeedback | null>(null);
+  const [aiError, setAiError] = useState('');
+  const [showAIModal, setShowAIModal] = useState(false);
+  const [timeline, setTimeline] = useState<TimelinePoint[]>([]);
+  const [weakWindows, setWeakWindows] = useState<WeakWindow[]>([]);
+
+  // 시간별 약점 구간 자동 탐지 (3초 윈도우 평균 < 60)
+  const detectWeakWindows = (tl: TimelinePoint[]): WeakWindow[] => {
+    if (tl.length < 6) return [];
+    const windows: WeakWindow[] = [];
+    const WINDOW_SIZE = 6; // 0.5s × 6 = 3초
+    for (let i = 0; i + WINDOW_SIZE <= tl.length; i++) {
+      const slice = tl.slice(i, i + WINDOW_SIZE);
+      const avg = slice.reduce((s, p) => s + p.score, 0) / slice.length;
+      if (avg < 60) {
+        windows.push({ start: slice[0].time, end: slice[slice.length - 1].time, avg });
+      }
+    }
+    // 겹치는 윈도우 병합
+    const merged: WeakWindow[] = [];
+    for (const w of windows) {
+      const last = merged[merged.length - 1];
+      if (last && w.start <= last.end + 0.5) {
+        last.end = Math.max(last.end, w.end);
+        last.avg = Math.min(last.avg, w.avg);
+      } else {
+        merged.push({ ...w });
+      }
+    }
+    return merged.sort((a, b) => a.avg - b.avg).slice(0, 3); // 가장 약한 3개
+  };
+
+  const handleRequestAITutor = async () => {
+    if (!apiUrl || !onAITutorSpend) return;
+    setAiBusy(true);
+    setAiError('');
+    try {
+      const ok = await onAITutorSpend();
+      if (!ok) {
+        setAiError('티켓이 부족합니다. 충전 후 다시 시도해주세요.');
+        setAiBusy(false);
+        return;
+      }
+      const res = await fetch(`${apiUrl}/ai-tutor`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          challengeTitle: challengeTitle,
+          musicTitle: challengeArtist || null,
+          score: finalScore,
+          timeline: timeline,
+          weakWindows: weakWindows,
+        }),
+      });
+      const data = await res.json();
+      if (data.feedback) {
+        setAiFeedback(data.feedback);
+        setShowAIModal(true);
+      } else {
+        setAiError(data.error || '분석 실패');
+      }
+    } catch (err: any) {
+      setAiError('네트워크 오류: ' + err.message);
+    } finally {
+      setAiBusy(false);
+    }
+  };
   
   const userPoseRef = useRef<Pose | null>(null);
   const targetPoseRef = useRef<Pose | null>(null);
@@ -161,12 +254,23 @@ export default function ChallengeComponent({
           setScore(currentScore);
           scoreDataRef.current.sum += currentScore;
           scoreDataRef.current.count += 1;
+          // 0.5초마다 timeline에 기록
+          const elapsed = (performance.now() - playStartTimeRef.current) / 1000;
+          if (elapsed - lastTimelinePushRef.current >= 0.5) {
+            timelineRef.current.push({ time: Number(elapsed.toFixed(2)), score: currentScore });
+            lastTimelinePushRef.current = elapsed;
+          }
         }
       } else {
         if (isPlayingRef.current) {
           setScore(0);
           scoreDataRef.current.sum += 0;
           scoreDataRef.current.count += 1;
+          const elapsed = (performance.now() - playStartTimeRef.current) / 1000;
+          if (elapsed - lastTimelinePushRef.current >= 0.5) {
+            timelineRef.current.push({ time: Number(elapsed.toFixed(2)), score: 0 });
+            lastTimelinePushRef.current = elapsed;
+          }
         }
       }
       ctx.restore();
@@ -219,6 +323,9 @@ export default function ChallengeComponent({
           videoRef.current.play();
           setIsPlaying(true);
           scoreDataRef.current = { sum: 0, count: 0 };
+          timelineRef.current = [];
+          lastTimelinePushRef.current = 0;
+          playStartTimeRef.current = performance.now();
         }
       }
     }, 1000);
@@ -234,6 +341,9 @@ export default function ChallengeComponent({
       ? Math.round(scoreDataRef.current.sum / scoreDataRef.current.count)
       : 0;
     setFinalScore(avgScore);
+    setTimeline([...timelineRef.current]);
+    setWeakWindows(detectWeakWindows(timelineRef.current));
+    setAiFeedback(null); // 매 도전마다 AI 분석 초기화
     onComplete?.(avgScore);
   };
 
@@ -299,7 +409,7 @@ export default function ChallengeComponent({
             {finalScore > 80 ? "완벽합니다! 댄스 마스터 🕺" : finalScore > 50 ? "아주 좋아요! 조금만 더 연습해볼까요? ✨" : "포기하지 마세요! 다시 도전! 🔥"}
           </p>
           
-          <div className="flex gap-4 w-full max-w-md mb-6">
+          <div className="flex gap-4 w-full max-w-md mb-4">
             <button onClick={() => { setIsFinished(false); scoreDataRef.current = {sum:0, count:0}; setScore(0); }} className="flex-1 bg-white/10 text-white py-4 rounded-2xl font-black text-lg flex justify-center items-center gap-2 hover:bg-white/20 transition-all">
               <RefreshCw size={24} /> 다시 하기
             </button>
@@ -307,6 +417,66 @@ export default function ChallengeComponent({
               목록으로
             </button>
           </div>
+
+          {/* AI 튜터링 버튼 */}
+          {apiUrl && onAITutorSpend && (
+            <div className="w-full max-w-md mb-6">
+              {!aiFeedback ? (
+                <button
+                  onClick={handleRequestAITutor}
+                  disabled={aiBusy || (!userIsPremium && (userTickets ?? 0) < 1)}
+                  className="w-full bg-gradient-to-r from-[#7C5CFC] via-[#9B7FFF] to-[#D8D8EC] text-black py-5 rounded-2xl font-black flex items-center justify-center gap-3 shadow-[0_0_30px_rgba(124,92,252,0.5)] hover:scale-[1.02] transition-all disabled:opacity-50 disabled:cursor-not-allowed"
+                >
+                  {aiBusy ? <><Loader2 className="animate-spin" size={20} /> Gemini 분석 중...</> : (
+                    <>
+                      <Sparkles size={22} />
+                      <span>AI 정밀 분석 받기</span>
+                      <span className="text-xs bg-black/20 px-2 py-1 rounded-full">
+                        {userIsPremium ? '🔓 무제한' : `🎟️ 1티켓 (잔액 ${userTickets ?? 0})`}
+                      </span>
+                    </>
+                  )}
+                </button>
+              ) : (
+                <button
+                  onClick={() => setShowAIModal(true)}
+                  className="w-full bg-white/10 text-white py-4 rounded-2xl font-black flex items-center justify-center gap-2 hover:bg-white/20 transition-all"
+                >
+                  <Sparkles size={20} /> AI 분석 결과 다시 보기
+                </button>
+              )}
+              {aiError && <p className="text-red-400 text-xs font-bold mt-2 text-center">{aiError}</p>}
+              {!userIsPremium && (userTickets ?? 0) < 1 && !aiFeedback && (
+                <p className="text-white/50 text-xs font-bold mt-2 text-center">티켓이 부족합니다 — 헤더 🎟️ 클릭해서 충전</p>
+              )}
+            </div>
+          )}
+
+          {/* 시간별 점수 차트 (무료, 항상 표시) */}
+          {timeline.length > 0 && (
+            <div className="w-full max-w-md bg-white/5 rounded-[2rem] p-6 border border-white/10 mb-6">
+              <div className="flex items-center gap-2 mb-3">
+                <TrendingUp className="text-[#7C5CFC]" size={20} />
+                <h3 className="font-black text-white">시간별 점수</h3>
+              </div>
+              <div className="h-32">
+                <ResponsiveContainer width="100%" height="100%">
+                  <LineChart data={timeline}>
+                    <XAxis dataKey="time" tick={{ fontSize: 10, fill: '#888' }} unit="s" />
+                    <YAxis domain={[0, 100]} tick={{ fontSize: 10, fill: '#888' }} />
+                    <Tooltip contentStyle={{ background: '#1a1a1a', border: 'none', borderRadius: 8 }} />
+                    <Line type="monotone" dataKey="score" stroke="#7C5CFC" strokeWidth={2} dot={false} />
+                    {weakWindows.map((w, i) => (
+                      <ReferenceArea key={i} x1={w.start} x2={w.end} fill="#FF4444" fillOpacity={0.15} />
+                    ))}
+                  </LineChart>
+                </ResponsiveContainer>
+              </div>
+              {weakWindows.length > 0 && (
+                <p className="text-xs font-bold text-red-300/80 mt-2">⚠️ 빨간 구간이 약점 — 반복 연습 추천</p>
+              )}
+            </div>
+          )}
 
           {/* 현재 챌린지/곡의 랭킹 표시 영역 (실데이터) */}
           <div className="w-full max-w-md bg-white/5 rounded-[2rem] p-6 border border-white/10 mb-8">
@@ -391,6 +561,76 @@ export default function ChallengeComponent({
                 </>
               );
             })()}
+          </div>
+        </div>
+      )}
+
+      {/* AI 튜터링 결과 모달 */}
+      {showAIModal && aiFeedback && (
+        <div className="fixed inset-0 z-[200] flex items-center justify-center p-4" onClick={() => setShowAIModal(false)}>
+          <div className="absolute inset-0 bg-black/70 backdrop-blur-sm" />
+          <div onClick={(e) => e.stopPropagation()} className="relative bg-gradient-to-b from-[#1a1a2e] to-[#0f0f1a] border border-[#7C5CFC]/30 rounded-3xl max-w-md w-full max-h-[85vh] overflow-y-auto shadow-2xl">
+            <div className="sticky top-0 bg-gradient-to-b from-[#1a1a2e] to-[#1a1a2e]/95 backdrop-blur-md p-5 flex items-center justify-between border-b border-white/10 z-10">
+              <h3 className="text-lg font-black text-white flex items-center gap-2">
+                <Sparkles className="text-[#7C5CFC]" size={20} /> AI 정밀 분석
+              </h3>
+              <button onClick={() => setShowAIModal(false)} className="text-white/50 hover:text-white">
+                <X size={20} />
+              </button>
+            </div>
+
+            <div className="p-5 space-y-5">
+              {/* 종합 평가 */}
+              <div className="bg-[#7C5CFC]/15 rounded-2xl p-4 border border-[#7C5CFC]/30">
+                <p className="text-xs font-black text-[#D8D8EC] mb-2 tracking-widest">SUMMARY</p>
+                <p className="text-white font-bold text-base leading-relaxed">{aiFeedback.summary}</p>
+              </div>
+
+              {/* 잘한 점 */}
+              {aiFeedback.strengths && aiFeedback.strengths.length > 0 && (
+                <div>
+                  <p className="text-xs font-black text-green-400 mb-2 tracking-widest">✅ 잘한 점</p>
+                  <ul className="space-y-1">
+                    {aiFeedback.strengths.map((s, i) => (
+                      <li key={i} className="text-white/90 text-sm font-bold flex gap-2">
+                        <span className="text-green-400">·</span> {s}
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              )}
+
+              {/* 개선점 */}
+              {aiFeedback.improvements && aiFeedback.improvements.length > 0 && (
+                <div>
+                  <p className="text-xs font-black text-yellow-400 mb-2 tracking-widest">💪 개선점</p>
+                  <div className="space-y-2">
+                    {aiFeedback.improvements.map((imp, i) => (
+                      <div key={i} className="bg-white/5 rounded-xl p-3 border border-white/10">
+                        <p className="text-yellow-300 text-xs font-black mb-1">{imp.area}</p>
+                        <p className="text-white/90 text-sm font-bold mb-1">{imp.issue}</p>
+                        <p className="text-white/60 text-xs">💡 {imp.tip}</p>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {/* 추천 연습 */}
+              {aiFeedback.drillRecommendation && (
+                <div className="bg-white/5 rounded-2xl p-4 border border-white/10">
+                  <p className="text-xs font-black text-[#D8D8EC] mb-2 tracking-widest">🎯 추천 연습</p>
+                  <p className="text-white/90 text-sm leading-relaxed">{aiFeedback.drillRecommendation}</p>
+                </div>
+              )}
+
+              {/* 격려 */}
+              {aiFeedback.encouragement && (
+                <div className="text-center py-3">
+                  <p className="text-[#D8D8EC] font-black text-base">{aiFeedback.encouragement}</p>
+                </div>
+              )}
+            </div>
           </div>
         </div>
       )}
