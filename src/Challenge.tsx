@@ -124,6 +124,8 @@ export default function ChallengeComponent({
   const [isPortrait, setIsPortrait] = useState(false);
   const [isMobile, setIsMobile] = useState(false);
   const [countdown, setCountdown] = useState<number | 'START' | null>(null);
+  // 원본 챌린지 영상이 가로인지 (가로일 때만 모바일 회전 안내)
+  const [videoIsLandscape, setVideoIsLandscape] = useState<boolean | null>(null);
   
   const isPlayingRef = useRef(false);
   const scoreDataRef = useRef({ sum: 0, count: 0 });
@@ -350,18 +352,42 @@ export default function ChallengeComponent({
   return (
     <div className="relative w-full h-screen bg-black overflow-hidden flex flex-col items-center justify-center">
       
-      {isMobile && isPortrait && (
+      {/* 모바일 + 가로 영상 + 세로 화면일 때만 회전 안내. 세로 영상은 그대로 진행 */}
+      {isMobile && isPortrait && videoIsLandscape === true && (
         <div className="absolute inset-0 z-[100] bg-black/95 flex flex-col items-center justify-center text-white p-8 text-center backdrop-blur-md">
           <Smartphone size={80} className="mb-6 text-[#7C5CFC] animate-pulse rotate-90 transition-all duration-1000" />
           <h2 className="text-3xl font-black mb-4 tracking-tight">화면을 눕혀주세요!</h2>
-          <p className="text-lg text-white/70 font-bold mb-2">가로 영상은 기기를 눕혀야</p>
-          <p className="text-lg text-white/70 font-bold">크고 정확하게 챌린지할 수 있습니다 🚀</p>
+          <p className="text-lg text-white/70 font-bold mb-2">이 챌린지는 가로 영상이라</p>
+          <p className="text-lg text-white/70 font-bold">기기를 눕혀야 크고 정확하게 챌린지 가능 🚀</p>
+        </div>
+      )}
+      {/* 가로 화면 + 세로 영상일 때 — 화면을 세로로 돌려달라는 안내 (선택적) */}
+      {isMobile && !isPortrait && videoIsLandscape === false && (
+        <div className="absolute inset-0 z-[100] bg-black/95 flex flex-col items-center justify-center text-white p-8 text-center backdrop-blur-md">
+          <Smartphone size={80} className="mb-6 text-[#7C5CFC] animate-pulse transition-all duration-1000" />
+          <h2 className="text-3xl font-black mb-4 tracking-tight">화면을 세워주세요!</h2>
+          <p className="text-lg text-white/70 font-bold mb-2">이 챌린지는 세로 영상이라</p>
+          <p className="text-lg text-white/70 font-bold">기기를 세워야 잘 보입니다 📱</p>
         </div>
       )}
 
       <Webcam ref={webcamRef} className="absolute inset-0 w-full h-full object-contain bg-black -scale-x-100" muted playsInline />
       
-      <video ref={videoRef} src={videoUrl} crossOrigin="anonymous" className={`absolute inset-0 w-full h-full object-contain bg-black transition-opacity duration-500 ${(isPlaying || countdown !== null) ? 'opacity-40' : 'opacity-0'}`} onEnded={handleVideoEnd} playsInline preload="auto" />
+      <video
+        ref={videoRef}
+        src={videoUrl}
+        crossOrigin="anonymous"
+        className={`absolute inset-0 w-full h-full object-contain bg-black transition-opacity duration-500 ${(isPlaying || countdown !== null) ? 'opacity-40' : 'opacity-0'}`}
+        onEnded={handleVideoEnd}
+        onLoadedMetadata={(e) => {
+          const v = e.currentTarget;
+          if (v.videoWidth > 0 && v.videoHeight > 0) {
+            setVideoIsLandscape(v.videoWidth > v.videoHeight);
+          }
+        }}
+        playsInline
+        preload="auto"
+      />
       
       <canvas ref={canvasRef} className="absolute inset-0 w-full h-full object-contain pointer-events-none z-10" />
 
