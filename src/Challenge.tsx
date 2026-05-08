@@ -3,13 +3,21 @@ import Webcam from 'react-webcam';
 import { Pose, POSE_CONNECTIONS } from '@mediapipe/pose';
 import { Camera } from '@mediapipe/camera_utils';
 import { drawConnectors, drawLandmarks } from '@mediapipe/drawing_utils';
-import { Play, RefreshCw, ArrowLeft, Smartphone, Trophy, User, Sparkles, Loader2, X, TrendingUp } from 'lucide-react';
+import { Play, RefreshCw, ArrowLeft, Smartphone, Trophy, User, Sparkles, Loader2, X, TrendingUp, Pause, Film, FastForward, Volume2, VolumeX } from 'lucide-react';
 import { collection, onSnapshot, query, where, doc, setDoc } from 'firebase/firestore';
 import { db } from './firebase';
 import { LineChart, Line, XAxis, YAxis, Tooltip, ResponsiveContainer, ReferenceArea } from 'recharts';
 
 interface ChallengeRankRow { userId: string; displayName: string; max: number; }
-interface TimelinePoint { time: number; score: number; }
+interface TimelinePoint {
+  time: number;
+  score: number;
+  // 그 시점의 관절 각도 차이 (사용자 - 원본, 양수면 더 펴짐)
+  rE?: number; // rightElbow diff
+  lE?: number; // leftElbow diff
+  rK?: number; // rightKnee diff
+  lK?: number; // leftKnee diff
+}
 interface WeakWindow { start: number; end: number; avg: number; }
 interface AIImprovement { area: string; issue: string; tip: string; }
 interface JointAngleSummary { user: number; target: number; diff: number; } // 각도 평균(도)
@@ -87,22 +95,26 @@ const calculateScore = (targetLandmarks: any, userLandmarks: any) => {
 };
 
 // 💡 챌린지 제목과 가수명을 받을 수 있도록 Props 추가
+interface ClipInfo { index: number; duration: number; video_url: string; thumb_url: string; }
+
 interface Props {
   videoUrl: string;
   playbackRate: number;
   userStickmanColor?: string;
-  challengeTitle?: string;  // 추가: 챌린지 제목
-  challengeArtist?: string; // 추가: 가수명 (또는 홈트 등)
-  challengeId?: string;     // 이 챌린지 ID (음악 없는 경우 리더보드 필터)
-  challengeMusicId?: string; // 챌린지의 음악 ID (있으면 곡 단위로 리더보드 집계)
-  currentUserId?: string;   // 본인 강조용
-  // AI 튜터링용
+  challengeTitle?: string;
+  challengeArtist?: string;
+  challengeId?: string;
+  challengeMusicId?: string;
+  currentUserId?: string;
+  // 맞춤 연습 추천용 (clips 정보 + 클립 도전 콜백)
+  clips?: ClipInfo[];
+  onPracticeClip?: (clipUrl: string, speed: number) => void;
   apiUrl?: string;
   userTickets?: number;
   userIsPremium?: boolean;
-  onAITutorSpend?: () => Promise<boolean>; // 티켓 차감 (premium이면 차감 X). 성공 시 true
+  onAITutorSpend?: () => Promise<boolean>;
   onBack: () => void;
-  onComplete?: (score: number) => void; // 챌린지 완료 시 점수 콜백
+  onComplete?: (score: number) => void;
 }
 
 export default function ChallengeComponent({
@@ -114,6 +126,8 @@ export default function ChallengeComponent({
   challengeId,
   challengeMusicId,
   currentUserId,
+  clips,
+  onPracticeClip,
   apiUrl,
   userTickets,
   userIsPremium,
@@ -173,6 +187,115 @@ export default function ChallengeComponent({
     leftKnee:   { uSum: 0, tSum: 0, count: 0 },
   });
   const [jointAngles, setJointAngles] = useState<JointAngleData | null>(null);
+
+  // TTS 음성 코칭 (실시간)
+  const [ttsEnabled, setTtsEnabled] = useState(() => {
+    try { return localStorage.getItem('doomchit_tts') === 'on'; } catch { return false; }
+  });
+  const lastTtsAtRef = useRef(0);
+  const TTS_COOLDOWN_MS = 5000; // 5초마다 1회 max
+
+  const speak = (text: string) => {
+    try {
+      if (!('speechSynthesis' in window)) return;
+      window.speechSynthesis.cancel();
+      const u = new SpeechSynthesisUtterance(text);
+      u.lang = 'ko-KR';
+      u.rate = 1.15;
+      u.pitch = 1.0;
+      u.volume = 0.9;
+      window.speechSynthesis.speak(u);
+    } catch {}
+  };
+
+  const generateCue = (key: string, diff: number): string => {
+    const cuesPositive: Record<string, string> = {
+      rightElbow: '오른팔을 좀 더 굽혀보세요',
+      leftElbow: '왼팔을 좀 더 굽혀보세요',
+      rightKnee: '오른쪽 무릎을 좀 더 굽혀보세요',
+      leftKnee: '왼쪽 무릎을 좀 더 굽혀보세요',
+    };
+    const cuesNegative: Record<string, string> = {
+      rightElbow: '오른팔을 좀 더 펴보세요',
+      leftElbow: '왼팔을 좀 더 펴보세요',
+      rightKnee: '오른쪽 무릎을 좀 더 펴보세요',
+      leftKnee: '왼쪽 무릎을 좀 더 펴보세요',
+    };
+    return diff > 0 ? cuesPositive[key] || '자세 확인' : cuesNegative[key] || '자세 확인';
+  };
+
+  // 비교 오버레이 (녹화)
+  const recorderRef = useRef<MediaRecorder | null>(null);
+  const recordedChunksRef = useRef<Blob[]>([]);
+  const [userRecordingUrl, setUserRecordingUrl] = useState<string | null>(null);
+  const [showOverlay, setShowOverlay] = useState(false);
+  const [overlayPlaying, setOverlayPlaying] = useState(false);
+  const [overlaySpeed, setOverlaySpeed] = useState(1.0);
+  const [overlayMuted, setOverlayMuted] = useState(false);
+  const overlayOriginalRef = useRef<HTMLVideoElement>(null);
+  const overlayUserRef = useRef<HTMLVideoElement>(null);
+
+  const startRecording = () => {
+    try {
+      if (!webcamRef.current?.video) return;
+      const stream = (webcamRef.current.video as any).srcObject as MediaStream | null;
+      if (!stream) return;
+      // 이전 녹화본 정리
+      if (userRecordingUrl) { try { URL.revokeObjectURL(userRecordingUrl); } catch {} }
+      setUserRecordingUrl(null);
+      recordedChunksRef.current = [];
+      // 브라우저별 codec 호환
+      let mime = 'video/webm;codecs=vp9';
+      if (!MediaRecorder.isTypeSupported(mime)) mime = 'video/webm;codecs=vp8';
+      if (!MediaRecorder.isTypeSupported(mime)) mime = 'video/webm';
+      const recorder = new MediaRecorder(stream, { mimeType: mime, videoBitsPerSecond: 1_500_000 });
+      recorder.ondataavailable = (e) => { if (e.data.size > 0) recordedChunksRef.current.push(e.data); };
+      recorder.onstop = () => {
+        if (recordedChunksRef.current.length === 0) return;
+        const blob = new Blob(recordedChunksRef.current, { type: 'video/webm' });
+        const url = URL.createObjectURL(blob);
+        setUserRecordingUrl(url);
+      };
+      recorder.start();
+      recorderRef.current = recorder;
+    } catch (err) {
+      console.warn('Recording start failed', err);
+    }
+  };
+
+  const stopRecording = () => {
+    try {
+      if (recorderRef.current && recorderRef.current.state !== 'inactive') {
+        recorderRef.current.stop();
+      }
+    } catch (err) { console.warn('Recording stop failed', err); }
+  };
+
+  // 비교 오버레이 동기화
+  const overlayTogglePlay = () => {
+    const o = overlayOriginalRef.current, u = overlayUserRef.current;
+    if (!o || !u) return;
+    if (overlayPlaying) { o.pause(); u.pause(); } else { o.play(); u.play(); }
+    setOverlayPlaying(!overlayPlaying);
+  };
+
+  const overlaySetSpeed = (s: number) => {
+    setOverlaySpeed(s);
+    if (overlayOriginalRef.current) overlayOriginalRef.current.playbackRate = s;
+    if (overlayUserRef.current) overlayUserRef.current.playbackRate = s;
+  };
+
+  const overlayJumpTo = (t: number) => {
+    if (overlayOriginalRef.current) overlayOriginalRef.current.currentTime = t;
+    if (overlayUserRef.current) overlayUserRef.current.currentTime = t;
+  };
+
+  // 한 비디오 시킹 시 다른 쪽도 동기화
+  const overlaySync = (e: React.SyntheticEvent<HTMLVideoElement>) => {
+    const t = e.currentTarget.currentTime;
+    const other = e.currentTarget === overlayOriginalRef.current ? overlayUserRef.current : overlayOriginalRef.current;
+    if (other && Math.abs(other.currentTime - t) > 0.25) other.currentTime = t;
+  };
 
   // AI 튜터링
   const [aiBusy, setAiBusy] = useState(false);
@@ -298,13 +421,7 @@ export default function ChallengeComponent({
           setScore(currentScore);
           scoreDataRef.current.sum += currentScore;
           scoreDataRef.current.count += 1;
-          // 0.5초마다 timeline에 기록
-          const elapsed = (performance.now() - playStartTimeRef.current) / 1000;
-          if (elapsed - lastTimelinePushRef.current >= 0.5) {
-            timelineRef.current.push({ time: Number(elapsed.toFixed(2)), score: currentScore });
-            lastTimelinePushRef.current = elapsed;
-          }
-          // 관절 각도 누적 (사용자 영상은 좌우 반전이라 user x를 1-x로 mirror)
+          // 관절 각도 계산 (사용자는 좌우 반전 mirror)
           const userMirrored = results.poseLandmarks.map((p: any) => ({ ...p, x: 1 - p.x }));
           const userAng = computeJointAngles(userMirrored);
           const targetAng = computeJointAngles(targetLandmarksRef.current);
@@ -318,6 +435,40 @@ export default function ChallengeComponent({
                 acc.count += 1;
               }
             }
+          }
+          // TTS 코칭 — 큰 편차 부위 1개에 대해 5초마다 max 1회
+          if (ttsEnabled && userAng && targetAng) {
+            const now = Date.now();
+            if (now - lastTtsAtRef.current > TTS_COOLDOWN_MS) {
+              const diffs: Array<[string, number]> = [
+                ['rightElbow', userAng.rightElbow - targetAng.rightElbow],
+                ['leftElbow', userAng.leftElbow - targetAng.leftElbow],
+                ['rightKnee', userAng.rightKnee - targetAng.rightKnee],
+                ['leftKnee', userAng.leftKnee - targetAng.leftKnee],
+              ];
+              let maxAbs = 0;
+              let pick: [string, number] | null = null;
+              for (const [k, d] of diffs) {
+                if (Math.abs(d) > maxAbs) { maxAbs = Math.abs(d); pick = [k, d]; }
+              }
+              if (pick && maxAbs > 30) {
+                speak(generateCue(pick[0], pick[1]));
+                lastTtsAtRef.current = now;
+              }
+            }
+          }
+          // 0.5초마다 timeline에 기록 (점수 + 관절 차이)
+          const elapsed = (performance.now() - playStartTimeRef.current) / 1000;
+          if (elapsed - lastTimelinePushRef.current >= 0.5) {
+            const pt: TimelinePoint = { time: Number(elapsed.toFixed(2)), score: currentScore };
+            if (userAng && targetAng) {
+              pt.rE = Number((userAng.rightElbow - targetAng.rightElbow).toFixed(1));
+              pt.lE = Number((userAng.leftElbow - targetAng.leftElbow).toFixed(1));
+              pt.rK = Number((userAng.rightKnee - targetAng.rightKnee).toFixed(1));
+              pt.lK = Number((userAng.leftKnee - targetAng.leftKnee).toFixed(1));
+            }
+            timelineRef.current.push(pt);
+            lastTimelinePushRef.current = elapsed;
           }
         }
       } else {
@@ -392,6 +543,8 @@ export default function ChallengeComponent({
             rightKnee:  { uSum: 0, tSum: 0, count: 0 },
             leftKnee:   { uSum: 0, tSum: 0, count: 0 },
           };
+          // 비교 오버레이용 webcam 녹화 시작
+          startRecording();
         }
       }
     }, 1000);
@@ -403,6 +556,7 @@ export default function ChallengeComponent({
   const handleVideoEnd = () => {
     setIsPlaying(false);
     setIsFinished(true);
+    stopRecording();
     const avgScore = scoreDataRef.current.count > 0
       ? Math.round(scoreDataRef.current.sum / scoreDataRef.current.count)
       : 0;
@@ -492,12 +646,25 @@ export default function ChallengeComponent({
       </div>
 
       {!isPlaying && !isFinished && countdown === null && (
-        <div className="absolute inset-0 flex items-center justify-center z-30 bg-black/40 backdrop-blur-sm">
+        <div className="absolute inset-0 flex flex-col items-center justify-center z-30 bg-black/40 backdrop-blur-sm gap-6">
           <button onClick={handleStartCountdown} className="group relative flex flex-col items-center hover:scale-110 transition-transform">
             <div className="bg-[#7C5CFC] rounded-full p-8 shadow-[0_0_40px_rgba(124,92,252,0.4)] group-hover:shadow-[0_0_60px_rgba(124,92,252,0.6)] transition-all">
               <Play fill="white" stroke="white" size={48} className="ml-2" />
             </div>
             <span className="mt-6 text-white font-black tracking-widest text-xl drop-shadow-lg">CHALLENGE START</span>
+          </button>
+          {/* TTS 음성 코칭 토글 */}
+          <button
+            onClick={() => {
+              const next = !ttsEnabled;
+              setTtsEnabled(next);
+              try { localStorage.setItem('doomchit_tts', next ? 'on' : 'off'); } catch {}
+              if (next) speak('음성 코칭 켜짐');
+            }}
+            className={`flex items-center gap-2 px-4 py-2 rounded-full text-sm font-black transition-all ${ttsEnabled ? 'bg-[#7C5CFC] text-white' : 'bg-white/10 text-white/60'}`}
+          >
+            {ttsEnabled ? <Volume2 size={16} /> : <VolumeX size={16} />}
+            음성 코칭 {ttsEnabled ? 'ON' : 'OFF'}
           </button>
         </div>
       )}
@@ -521,6 +688,17 @@ export default function ChallengeComponent({
               목록으로
             </button>
           </div>
+
+          {/* 비교 오버레이 버튼 (녹화본 있을 때만) */}
+          {userRecordingUrl && (
+            <button
+              onClick={() => setShowOverlay(true)}
+              className="w-full max-w-md mb-4 bg-white/10 hover:bg-white/20 text-white py-4 rounded-2xl font-black flex items-center justify-center gap-3 transition-all"
+            >
+              <Film size={20} className="text-[#7C5CFC]" />
+              <span>비교 영상 보기 (원본 vs 너)</span>
+            </button>
+          )}
 
           {/* AI 튜터링 버튼 */}
           {apiUrl && onAITutorSpend && (
@@ -585,6 +763,62 @@ export default function ChallengeComponent({
             </div>
           )}
 
+          {/* 맞춤 연습 추천 — 약점 구간을 클립 인덱스에 매핑 */}
+          {weakWindows.length > 0 && clips && clips.length > 1 && onPracticeClip && (() => {
+            // 클립별 누적 시작/끝 시간 계산 (클립이 순차적으로 이어진다고 가정)
+            const clipRanges: Array<{ clip: ClipInfo; start: number; end: number }> = [];
+            let cum = 0;
+            for (const c of clips) {
+              clipRanges.push({ clip: c, start: cum, end: cum + c.duration });
+              cum += c.duration;
+            }
+            // 약점 구간 → 가장 많이 겹치는 클립
+            const recos = weakWindows.map(w => {
+              let best = clipRanges[0];
+              let bestOverlap = 0;
+              for (const r of clipRanges) {
+                const overlap = Math.max(0, Math.min(w.end, r.end) - Math.max(w.start, r.start));
+                if (overlap > bestOverlap) {
+                  bestOverlap = overlap;
+                  best = r;
+                }
+              }
+              return { window: w, clip: best.clip };
+            });
+            // 같은 클립 중복 제거
+            const seen = new Set<number>();
+            const uniqueRecos = recos.filter(r => {
+              if (seen.has(r.clip.index)) return false;
+              seen.add(r.clip.index);
+              return true;
+            });
+            return (
+              <div className="w-full max-w-md bg-white/5 rounded-[2rem] p-6 border border-white/10 mb-4">
+                <h3 className="font-black text-white mb-1 flex items-center gap-2">
+                  🎯 맞춤 연습 추천
+                </h3>
+                <p className="text-xs text-white/50 font-bold mb-3">약점 구간이 포함된 클립 — 0.5배속으로 천천히 다시 도전</p>
+                <div className="space-y-2">
+                  {uniqueRecos.map(({ window, clip }) => (
+                    <div key={clip.index} className="flex items-center gap-3 bg-white/5 rounded-2xl p-3">
+                      <img src={clip.thumb_url.startsWith('http') ? clip.thumb_url : `${apiUrl}${clip.thumb_url}`} className="w-14 h-14 rounded-lg object-cover bg-black/40" alt="" />
+                      <div className="flex-1 min-w-0">
+                        <p className="text-white font-black text-sm">동작 #{clip.index}</p>
+                        <p className="text-white/60 text-xs font-bold">정확도 {Math.round(window.avg)}% · {window.start.toFixed(1)}~{window.end.toFixed(1)}초</p>
+                      </div>
+                      <button
+                        onClick={() => onPracticeClip(clip.video_url, 0.5)}
+                        className="bg-[#7C5CFC] text-white px-3 py-2 rounded-xl text-xs font-black hover:bg-[#684be0] active:scale-95"
+                      >
+                        🐢 0.5x 연습
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            );
+          })()}
+
           {/* 시간별 점수 차트 (무료, 항상 표시) */}
           {timeline.length > 0 && (
             <div className="w-full max-w-md bg-white/5 rounded-[2rem] p-6 border border-white/10 mb-6">
@@ -592,19 +826,42 @@ export default function ChallengeComponent({
                 <TrendingUp className="text-[#7C5CFC]" size={20} />
                 <h3 className="font-black text-white">시간별 점수</h3>
               </div>
-              <div className="h-32">
+              <div className="h-40">
                 <ResponsiveContainer width="100%" height="100%">
                   <LineChart data={timeline}>
                     <XAxis dataKey="time" tick={{ fontSize: 10, fill: '#888' }} unit="s" />
                     <YAxis domain={[0, 100]} tick={{ fontSize: 10, fill: '#888' }} />
-                    <Tooltip contentStyle={{ background: '#1a1a1a', border: 'none', borderRadius: 8 }} />
-                    <Line type="monotone" dataKey="score" stroke="#7C5CFC" strokeWidth={2} dot={false} />
+                    <Tooltip
+                      content={({ active, payload }: any) => {
+                        if (!active || !payload?.[0]) return null;
+                        const d: TimelinePoint = payload[0].payload;
+                        const rows: Array<[string, number | undefined]> = [
+                          ['오른팔', d.rE], ['왼팔', d.lE], ['오른다리', d.rK], ['왼다리', d.lK],
+                        ];
+                        return (
+                          <div className="bg-black/90 rounded-lg p-3 text-xs border border-white/10">
+                            <p className="font-black text-white mb-1">⏱ {d.time.toFixed(1)}초 — 점수 {d.score}</p>
+                            {rows.map(([name, v]) =>
+                              v !== undefined ? (
+                                <p key={name} className="text-white/80">
+                                  {name}: <span className={Math.abs(v) > 25 ? 'text-red-400 font-bold' : Math.abs(v) > 10 ? 'text-yellow-300' : 'text-green-300'}>
+                                    {v > 0 ? '+' : ''}{v.toFixed(0)}°
+                                  </span>
+                                </p>
+                              ) : null
+                            )}
+                          </div>
+                        );
+                      }}
+                    />
+                    <Line type="monotone" dataKey="score" stroke="#7C5CFC" strokeWidth={2} dot={false} activeDot={{ r: 4 }} />
                     {weakWindows.map((w, i) => (
                       <ReferenceArea key={i} x1={w.start} x2={w.end} fill="#FF4444" fillOpacity={0.15} />
                     ))}
                   </LineChart>
                 </ResponsiveContainer>
               </div>
+              <p className="text-xs text-white/40 mt-1 text-center">차트 위에 마우스/터치 — 그 순간 관절 각도 차이 확인</p>
               {weakWindows.length > 0 && (
                 <p className="text-xs font-bold text-red-300/80 mt-2">⚠️ 빨간 구간이 약점 — 반복 연습 추천</p>
               )}
@@ -694,6 +951,95 @@ export default function ChallengeComponent({
                 </>
               );
             })()}
+          </div>
+        </div>
+      )}
+
+      {/* 비교 오버레이 모달 */}
+      {showOverlay && userRecordingUrl && (
+        <div className="fixed inset-0 z-[200] bg-black flex flex-col">
+          {/* 헤더 */}
+          <div className="flex items-center justify-between p-4 border-b border-white/10">
+            <h3 className="text-white font-black text-lg flex items-center gap-2">
+              <Film size={20} className="text-[#7C5CFC]" /> 비교 영상
+            </h3>
+            <button onClick={() => { setShowOverlay(false); setOverlayPlaying(false); overlayOriginalRef.current?.pause(); overlayUserRef.current?.pause(); }} className="text-white/60 hover:text-white">
+              <X size={24} />
+            </button>
+          </div>
+
+          {/* 분할 화면 */}
+          <div className="flex-1 grid grid-rows-2 md:grid-rows-1 md:grid-cols-2 gap-1 p-2 min-h-0">
+            <div className="relative bg-black rounded-xl overflow-hidden">
+              <video
+                ref={overlayOriginalRef}
+                src={videoUrl}
+                crossOrigin="anonymous"
+                className="absolute inset-0 w-full h-full object-contain"
+                onTimeUpdate={overlaySync}
+                onEnded={() => setOverlayPlaying(false)}
+                muted={overlayMuted}
+                playsInline
+              />
+              <span className="absolute top-2 left-2 bg-[#7C5CFC] text-white text-xs font-black px-2 py-1 rounded">원본</span>
+            </div>
+            <div className="relative bg-black rounded-xl overflow-hidden">
+              <video
+                ref={overlayUserRef}
+                src={userRecordingUrl}
+                className="absolute inset-0 w-full h-full object-contain -scale-x-100"
+                onTimeUpdate={overlaySync}
+                muted
+                playsInline
+              />
+              <span className="absolute top-2 left-2 bg-green-500 text-black text-xs font-black px-2 py-1 rounded">너</span>
+            </div>
+          </div>
+
+          {/* 컨트롤 + 약점 구간 점프 */}
+          <div className="border-t border-white/10 p-4 space-y-3">
+            <div className="flex items-center justify-center gap-3">
+              <button
+                onClick={overlayTogglePlay}
+                className="w-14 h-14 rounded-full bg-[#7C5CFC] text-white flex items-center justify-center hover:bg-[#684be0] active:scale-95"
+              >
+                {overlayPlaying ? <Pause size={24} /> : <Play size={24} className="ml-0.5" fill="currentColor" />}
+              </button>
+              <div className="flex bg-white/5 rounded-full p-1">
+                {[0.25, 0.5, 1.0].map(s => (
+                  <button
+                    key={s}
+                    onClick={() => overlaySetSpeed(s)}
+                    className={`px-3 py-1.5 rounded-full text-xs font-black transition-all ${overlaySpeed === s ? 'bg-white text-black' : 'text-white/60'}`}
+                  >
+                    {s}x
+                  </button>
+                ))}
+              </div>
+              <button
+                onClick={() => setOverlayMuted(!overlayMuted)}
+                className="w-10 h-10 rounded-full bg-white/5 text-white/70 flex items-center justify-center hover:bg-white/10"
+              >
+                {overlayMuted ? <VolumeX size={18} /> : <Volume2 size={18} />}
+              </button>
+            </div>
+
+            {weakWindows.length > 0 && (
+              <div>
+                <p className="text-xs font-black text-red-400 mb-2 text-center">⚠️ 약점 구간으로 점프</p>
+                <div className="flex gap-2 overflow-x-auto justify-center">
+                  {weakWindows.map((w, i) => (
+                    <button
+                      key={i}
+                      onClick={() => { overlayJumpTo(w.start); overlaySetSpeed(0.5); if (!overlayPlaying) overlayTogglePlay(); }}
+                      className="bg-red-500/20 text-red-300 hover:bg-red-500/30 px-3 py-2 rounded-xl text-xs font-black whitespace-nowrap flex items-center gap-1"
+                    >
+                      <FastForward size={12} /> {w.start.toFixed(1)}~{w.end.toFixed(1)}s ({Math.round(w.avg)}%)
+                    </button>
+                  ))}
+                </div>
+              </div>
+            )}
           </div>
         </div>
       )}

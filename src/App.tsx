@@ -1532,6 +1532,8 @@ export default function App() {
               apiUrl={API_URL}
               userTickets={userProfile?.tickets ?? 0}
               userIsPremium={isPremiumActive(userProfile)}
+              clips={selectedChallenge?.clips}
+              onPracticeClip={(url, speed) => { setChallengeClipUrl(url); setChallengeSpeed(speed); }}
               onAITutorSpend={async () => {
                 if (!userProfile) return false;
                 if (isPremiumActive(userProfile)) return true; // 구독자는 무제한
