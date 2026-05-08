@@ -19,15 +19,20 @@ interface TimelinePoint {
   lK?: number; // leftKnee diff
 }
 interface WeakWindow { start: number; end: number; avg: number; }
-interface AIImprovement { area: string; issue: string; tip: string; }
-interface JointAngleSummary { user: number; target: number; diff: number; } // 각도 평균(도)
+interface AIImprovement { area: string; issue: string; tip: string; timeHint?: string; }
+interface JointAngleSummary { user: number; target: number; diff: number; }
 type JointAngleData = Record<string, JointAngleSummary>;
 interface AIFeedback {
   summary: string;
   strengths: string[];
   improvements: AIImprovement[];
+  timing?: string;
   drillRecommendation: string;
   encouragement: string;
+}
+interface AICoachAnalysis {
+  dtw?: { avg_offset_sec: number; biggest_offset_sec: number; biggest_offset_time: number };
+  musicSync?: { tempo_bpm: number; avg_beat_offset_sec: number };
 }
 
 // 세 점 사이 각도 (도) — p2가 꼭짓점 (관절)
@@ -179,6 +184,9 @@ export default function ChallengeComponent({
   const timelineRef = useRef<TimelinePoint[]>([]);
   const playStartTimeRef = useRef<number>(0);
   const lastTimelinePushRef = useRef<number>(0);
+  // 포즈 시계열 (DTW 분석용, 10Hz 샘플링) — flatten된 33개 키포인트의 [x, y]
+  const lastPosePushRef = useRef<number>(0);
+  const poseTimelineRef = useRef<{ t: number; u: number[]; r: number[] }[]>([]);
   // 관절 각도 누적 (각 관절별 user/target 합산 + 카운트)
   const jointAccumRef = useRef<Record<string, { uSum: number; tSum: number; count: number }>>({
     rightElbow: { uSum: 0, tSum: 0, count: 0 },
@@ -234,6 +242,8 @@ export default function ChallengeComponent({
   const [overlayMuted, setOverlayMuted] = useState(false);
   const overlayOriginalRef = useRef<HTMLVideoElement>(null);
   const overlayUserRef = useRef<HTMLVideoElement>(null);
+  // 차트 클릭 시 그 시점으로 점프하기 위한 대기 시간
+  const [pendingJumpTime, setPendingJumpTime] = useState<number | null>(null);
 
   const startRecording = () => {
     try {
@@ -299,7 +309,9 @@ export default function ChallengeComponent({
 
   // AI 튜터링
   const [aiBusy, setAiBusy] = useState(false);
+  const [aiBusyMsg, setAiBusyMsg] = useState('');
   const [aiFeedback, setAiFeedback] = useState<AIFeedback | null>(null);
+  const [aiAnalysis, setAiAnalysis] = useState<AICoachAnalysis | null>(null);
   const [aiError, setAiError] = useState('');
   const [showAIModal, setShowAIModal] = useState(false);
   const [timeline, setTimeline] = useState<TimelinePoint[]>([]);
@@ -334,6 +346,7 @@ export default function ChallengeComponent({
   const handleRequestAITutor = async () => {
     if (!apiUrl || !onAITutorSpend) return;
     setAiBusy(true);
+    setAiBusyMsg('Gemini 분석 시작...');
     setAiError('');
     try {
       const ok = await onAITutorSpend();
@@ -342,21 +355,38 @@ export default function ChallengeComponent({
         setAiBusy(false);
         return;
       }
-      const res = await fetch(`${apiUrl}/ai-tutor`, {
+      // 녹화본 blob 가져오기
+      let userRecordingBlob: Blob | null = null;
+      if (userRecordingUrl) {
+        try {
+          setAiBusyMsg('영상 준비 중...');
+          const r = await fetch(userRecordingUrl);
+          userRecordingBlob = await r.blob();
+        } catch (e) { console.warn('blob fetch failed', e); }
+      }
+
+      const fd = new FormData();
+      fd.append('score', String(finalScore));
+      fd.append('challengeTitle', challengeTitle);
+      if (challengeArtist) fd.append('musicTitle', challengeArtist);
+      fd.append('timeline', JSON.stringify(timeline));
+      fd.append('jointAngles', JSON.stringify(jointAngles || {}));
+      fd.append('weakWindows', JSON.stringify(weakWindows));
+      // DTW용 포즈 시계열 (10Hz, 한 챌린지에 ~600개 entry, ~80KB)
+      fd.append('poseTimeline', JSON.stringify(poseTimelineRef.current));
+      // Firebase URL이 절대 URL이면 그대로 전달 (백엔드가 다운로드해서 Gemini Vision)
+      if (videoUrl.startsWith('http')) fd.append('referenceVideoUrl', videoUrl);
+      if (userRecordingBlob) fd.append('userRecording', userRecordingBlob, 'user.webm');
+
+      setAiBusyMsg('AI 분석 중 (10~20초)...');
+      const res = await fetch(`${apiUrl}/ai-coach`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          challengeTitle: challengeTitle,
-          musicTitle: challengeArtist || null,
-          score: finalScore,
-          timeline: timeline,
-          jointAngles: jointAngles,
-          weakWindows: weakWindows,
-        }),
+        body: fd,
       });
       const data = await res.json();
       if (data.feedback) {
         setAiFeedback(data.feedback);
+        setAiAnalysis(data.analysis || null);
         setShowAIModal(true);
       } else {
         setAiError(data.error || '분석 실패');
@@ -365,6 +395,7 @@ export default function ChallengeComponent({
       setAiError('네트워크 오류: ' + err.message);
     } finally {
       setAiBusy(false);
+      setAiBusyMsg('');
     }
   };
   
@@ -457,8 +488,17 @@ export default function ChallengeComponent({
               }
             }
           }
-          // 0.5초마다 timeline에 기록 (점수 + 관절 차이)
+          // 0.1초마다 포즈 시계열 캡처 (DTW용)
           const elapsed = (performance.now() - playStartTimeRef.current) / 1000;
+          if (elapsed - lastPosePushRef.current >= 0.1 && targetLandmarksRef.current) {
+            const u = userMirrored.flatMap((p: any) => [p.x, p.y]);
+            const r = targetLandmarksRef.current.flatMap((p: any) => [p.x, p.y]);
+            if (u.length === 66 && r.length === 66) {
+              poseTimelineRef.current.push({ t: Number(elapsed.toFixed(2)), u, r });
+            }
+            lastPosePushRef.current = elapsed;
+          }
+          // 0.5초마다 timeline에 기록 (점수 + 관절 차이)
           if (elapsed - lastTimelinePushRef.current >= 0.5) {
             const pt: TimelinePoint = { time: Number(elapsed.toFixed(2)), score: currentScore };
             if (userAng && targetAng) {
@@ -535,6 +575,8 @@ export default function ChallengeComponent({
           scoreDataRef.current = { sum: 0, count: 0 };
           timelineRef.current = [];
           lastTimelinePushRef.current = 0;
+          lastPosePushRef.current = 0;
+          poseTimelineRef.current = [];
           playStartTimeRef.current = performance.now();
           // 관절 각도 누적 초기화
           jointAccumRef.current = {
@@ -709,7 +751,7 @@ export default function ChallengeComponent({
                   disabled={aiBusy || (!userIsPremium && (userTickets ?? 0) < 1)}
                   className="w-full bg-gradient-to-r from-[#7C5CFC] via-[#9B7FFF] to-[#D8D8EC] text-black py-5 rounded-2xl font-black flex items-center justify-center gap-3 shadow-[0_0_30px_rgba(124,92,252,0.5)] hover:scale-[1.02] transition-all disabled:opacity-50 disabled:cursor-not-allowed"
                 >
-                  {aiBusy ? <><Loader2 className="animate-spin" size={20} /> Gemini 분석 중...</> : (
+                  {aiBusy ? <><Loader2 className="animate-spin" size={20} /> {aiBusyMsg || 'Gemini 분석 중...'}</> : (
                     <>
                       <Sparkles size={22} />
                       <span>AI 정밀 분석 받기</span>
@@ -828,7 +870,24 @@ export default function ChallengeComponent({
               </div>
               <div className="h-40">
                 <ResponsiveContainer width="100%" height="100%">
-                  <LineChart data={timeline}>
+                  <LineChart
+                    data={timeline}
+                    onClick={(state: any) => {
+                      const t = state?.activePayload?.[0]?.payload?.time;
+                      if (typeof t !== 'number' || !userRecordingUrl) return;
+                      if (showOverlay && overlayOriginalRef.current && overlayUserRef.current) {
+                        // 이미 열려있으면 즉시 점프
+                        overlayJumpTo(t);
+                        overlaySetSpeed(0.5);
+                        if (!overlayPlaying) overlayTogglePlay();
+                      } else {
+                        // 모달 열고 onLoadedData에서 점프
+                        setPendingJumpTime(t);
+                        setShowOverlay(true);
+                      }
+                    }}
+                    style={{ cursor: userRecordingUrl ? 'pointer' : 'default' }}
+                  >
                     <XAxis dataKey="time" tick={{ fontSize: 10, fill: '#888' }} unit="s" />
                     <YAxis domain={[0, 100]} tick={{ fontSize: 10, fill: '#888' }} />
                     <Tooltip
@@ -978,6 +1037,17 @@ export default function ChallengeComponent({
                 className="absolute inset-0 w-full h-full object-contain"
                 onTimeUpdate={overlaySync}
                 onEnded={() => setOverlayPlaying(false)}
+                onLoadedData={() => {
+                  if (pendingJumpTime !== null && overlayOriginalRef.current && overlayUserRef.current) {
+                    overlayOriginalRef.current.currentTime = pendingJumpTime;
+                    overlayUserRef.current.currentTime = pendingJumpTime;
+                    overlaySetSpeed(0.5);
+                    overlayOriginalRef.current.play();
+                    overlayUserRef.current.play();
+                    setOverlayPlaying(true);
+                    setPendingJumpTime(null);
+                  }
+                }}
                 muted={overlayMuted}
                 playsInline
               />
@@ -1065,6 +1135,32 @@ export default function ChallengeComponent({
                 <p className="text-white font-bold text-base leading-relaxed">{aiFeedback.summary}</p>
               </div>
 
+              {/* 정량 분석 데이터 (DTW + 음악 동기) */}
+              {aiAnalysis && (aiAnalysis.dtw || aiAnalysis.musicSync) && (
+                <div className="grid grid-cols-2 gap-2">
+                  {aiAnalysis.dtw && (
+                    <div className="bg-white/5 rounded-xl p-3 border border-white/10">
+                      <p className="text-[10px] font-black text-blue-300 tracking-widest mb-1">⏱ 타이밍 (DTW)</p>
+                      <p className="text-white text-sm font-bold">
+                        {aiAnalysis.dtw.avg_offset_sec > 0 ? `${aiAnalysis.dtw.avg_offset_sec.toFixed(2)}초 늦음` :
+                         aiAnalysis.dtw.avg_offset_sec < 0 ? `${Math.abs(aiAnalysis.dtw.avg_offset_sec).toFixed(2)}초 빠름` : '완벽 일치'}
+                      </p>
+                      <p className="text-white/50 text-[10px]">최대 어긋남: {aiAnalysis.dtw.biggest_offset_time.toFixed(1)}초 시점</p>
+                    </div>
+                  )}
+                  {aiAnalysis.musicSync && (
+                    <div className="bg-white/5 rounded-xl p-3 border border-white/10">
+                      <p className="text-[10px] font-black text-pink-300 tracking-widest mb-1">🎵 박자 (BPM {aiAnalysis.musicSync.tempo_bpm})</p>
+                      <p className="text-white text-sm font-bold">
+                        {Math.abs(aiAnalysis.musicSync.avg_beat_offset_sec) < 0.05 ? '박자 정확' :
+                         aiAnalysis.musicSync.avg_beat_offset_sec > 0 ? `${aiAnalysis.musicSync.avg_beat_offset_sec.toFixed(2)}초 느림` :
+                         `${Math.abs(aiAnalysis.musicSync.avg_beat_offset_sec).toFixed(2)}초 빠름`}
+                      </p>
+                    </div>
+                  )}
+                </div>
+              )}
+
               {/* 잘한 점 */}
               {aiFeedback.strengths && aiFeedback.strengths.length > 0 && (
                 <div>
@@ -1079,19 +1175,51 @@ export default function ChallengeComponent({
                 </div>
               )}
 
-              {/* 개선점 */}
+              {/* 개선점 (timeHint 있으면 비교 영상으로 바로 점프) */}
               {aiFeedback.improvements && aiFeedback.improvements.length > 0 && (
                 <div>
                   <p className="text-xs font-black text-yellow-400 mb-2 tracking-widest">💪 개선점</p>
                   <div className="space-y-2">
-                    {aiFeedback.improvements.map((imp, i) => (
-                      <div key={i} className="bg-white/5 rounded-xl p-3 border border-white/10">
-                        <p className="text-yellow-300 text-xs font-black mb-1">{imp.area}</p>
-                        <p className="text-white/90 text-sm font-bold mb-1">{imp.issue}</p>
-                        <p className="text-white/60 text-xs">💡 {imp.tip}</p>
-                      </div>
-                    ))}
+                    {aiFeedback.improvements.map((imp, i) => {
+                      const t = imp.timeHint ? parseFloat(imp.timeHint) : NaN;
+                      const canJump = !isNaN(t) && userRecordingUrl;
+                      return (
+                        <div key={i} className="bg-white/5 rounded-xl p-3 border border-white/10">
+                          <div className="flex items-center justify-between gap-2 mb-1">
+                            <p className="text-yellow-300 text-xs font-black">{imp.area}</p>
+                            {canJump && (
+                              <button
+                                onClick={() => {
+                                  setShowAIModal(false);
+                                  if (showOverlay && overlayOriginalRef.current && overlayUserRef.current) {
+                                    overlayJumpTo(t);
+                                    overlaySetSpeed(0.5);
+                                    if (!overlayPlaying) overlayTogglePlay();
+                                  } else {
+                                    setPendingJumpTime(t);
+                                    setShowOverlay(true);
+                                  }
+                                }}
+                                className="bg-[#7C5CFC]/30 text-[#D8D8EC] px-2 py-0.5 rounded text-[10px] font-black hover:bg-[#7C5CFC]/50"
+                              >
+                                ▶ {t.toFixed(1)}초 보기
+                              </button>
+                            )}
+                          </div>
+                          <p className="text-white/90 text-sm font-bold mb-1">{imp.issue}</p>
+                          <p className="text-white/60 text-xs">💡 {imp.tip}</p>
+                        </div>
+                      );
+                    })}
                   </div>
+                </div>
+              )}
+
+              {/* 타이밍 평가 */}
+              {aiFeedback.timing && (
+                <div className="bg-blue-500/10 rounded-2xl p-4 border border-blue-500/20">
+                  <p className="text-xs font-black text-blue-300 mb-2 tracking-widest">⏱ 타이밍 평가</p>
+                  <p className="text-white/90 text-sm leading-relaxed">{aiFeedback.timing}</p>
                 </div>
               )}
 
