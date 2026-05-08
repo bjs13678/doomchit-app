@@ -31,7 +31,7 @@ interface AIFeedback {
   encouragement: string;
 }
 interface AICoachAnalysis {
-  dtw?: { avg_offset_sec: number; biggest_offset_sec: number; biggest_offset_time: number };
+  dtw?: { avg_offset_sec: number; biggest_offset_sec: number; biggest_offset_time: number; aligned_score?: number };
   musicSync?: { tempo_bpm: number; avg_beat_offset_sec: number };
 }
 
@@ -66,36 +66,72 @@ const JOINT_LABELS_KR: Record<string, string> = {
   leftKnee: '왼다리 굽힘',
 };
 
+// 관절별 댄스 중요도 가중치 (손/팔이 발보다 임팩트 큼)
+const JOINT_WEIGHTS: Record<number, number> = {
+  11: 0.8, 12: 0.8,   // 어깨 (그루브)
+  13: 1.0, 14: 1.0,   // 팔꿈치
+  15: 1.5, 16: 1.5,   // 손목 ⭐ 가장 중요 (포인트 동작)
+  23: 0.9, 24: 0.9,   // 골반 (웨이브)
+  25: 0.7, 26: 0.7,   // 무릎
+  27: 0.5, 28: 0.5,   // 발목 (가장 덜 중요)
+};
+
+// 어깨 너비 기준으로 좌표 정규화 — 키/팔 길이/체형 차이 보정
+const normalizePose = (landmarks: any[]): any[] => {
+  if (!landmarks || landmarks.length < 33) return landmarks;
+  const lS = landmarks[11], rS = landmarks[12];
+  if (!lS || !rS) return landmarks;
+  const cx = (lS.x + rS.x) / 2;
+  const cy = (lS.y + rS.y) / 2;
+  const cz = ((lS.z || 0) + (rS.z || 0)) / 2;
+  const dx = lS.x - rS.x;
+  const dy = lS.y - rS.y;
+  const shoulderWidth = Math.sqrt(dx * dx + dy * dy);
+  if (shoulderWidth < 0.01) return landmarks;
+  return landmarks.map(lm => ({
+    ...lm,
+    x: (lm.x - cx) / shoulderWidth,
+    y: (lm.y - cy) / shoulderWidth,
+    z: ((lm.z || 0) - cz) / shoulderWidth,
+  }));
+};
+
 const calculateScore = (targetLandmarks: any, userLandmarks: any) => {
   if (!userLandmarks || userLandmarks.length === 0) return 0;
   if (!targetLandmarks || targetLandmarks.length === 0) return 0;
 
-  const keyJoints = [11, 12, 13, 14, 15, 16, 23, 24, 25, 26, 27, 28];
-  
-  let totalDistance = 0;
-  let validJoints = 0;
+  // (1) Mirror 보정 후 (2) 체형 정규화
+  const userMirrored = userLandmarks.map((p: any) => ({ ...p, x: 1 - p.x }));
+  const userN = normalizePose(userMirrored);
+  const targetN = normalizePose(targetLandmarks);
 
-  keyJoints.forEach((index) => {
-    const target = targetLandmarks[index];
-    const user = userLandmarks[index];
+  let totalWeightedDistance = 0;
+  let totalWeight = 0;
 
-    if (target && user && target.visibility > 0.5 && user.visibility > 0.5) {
-      const userMirroredX = 1 - user.x; 
-      const dx = target.x - userMirroredX;
-      const dy = target.y - user.y;
-      
-      const distance = Math.sqrt(dx * dx + dy * dy);
-      totalDistance += distance;
-      validJoints++;
-    }
-  });
+  for (const [idxStr, weight] of Object.entries(JOINT_WEIGHTS)) {
+    const idx = parseInt(idxStr);
+    const target = targetN[idx];
+    const user = userN[idx];
+    if (!target || !user) continue;
+    if (target.visibility < 0.5 || user.visibility < 0.5) continue;
 
-  if (validJoints === 0) return 0; 
+    // (3) 3D 거리 (z 좌표 포함)
+    const dx = target.x - user.x;
+    const dy = target.y - user.y;
+    const dz = (target.z || 0) - (user.z || 0);
+    const distance = Math.sqrt(dx * dx + dy * dy + dz * dz);
 
-  const avgDistance = totalDistance / validJoints;
-  const maxDistance = 0.25; 
-  let score = 100 - ((avgDistance / maxDistance) * 100);
+    // (4) 관절별 가중치 적용
+    totalWeightedDistance += distance * weight;
+    totalWeight += weight;
+  }
 
+  if (totalWeight === 0) return 0;
+
+  const avgDistance = totalWeightedDistance / totalWeight;
+  // 정규화된 좌표계라 단위가 어깨너비. 1.0 어깨너비 차이 = 0점
+  const maxDistance = 1.0;
+  let score = 100 - (avgDistance / maxDistance) * 100;
   return Math.round(Math.max(0, Math.min(100, score)));
 };
 
@@ -1134,6 +1170,30 @@ export default function ChallengeComponent({
                 <p className="text-xs font-black text-[#D8D8EC] mb-2 tracking-widest">SUMMARY</p>
                 <p className="text-white font-bold text-base leading-relaxed">{aiFeedback.summary}</p>
               </div>
+
+              {/* 점수 비교 카드 (실시간 vs 박자 보정) */}
+              {aiAnalysis?.dtw?.aligned_score !== undefined && (
+                <div className="bg-gradient-to-br from-[#7C5CFC]/20 to-purple-500/10 rounded-2xl p-4 border border-[#7C5CFC]/30">
+                  <p className="text-[10px] font-black text-[#D8D8EC] tracking-widest mb-2">📊 점수 비교</p>
+                  <div className="grid grid-cols-2 gap-3">
+                    <div>
+                      <p className="text-[10px] text-white/50 font-bold">실시간 (자세 + 박자)</p>
+                      <p className="text-3xl font-black text-white">{finalScore}<span className="text-sm">점</span></p>
+                    </div>
+                    <div>
+                      <p className="text-[10px] text-green-300 font-bold">박자 보정 (자세만)</p>
+                      <p className="text-3xl font-black text-green-400">{aiAnalysis.dtw.aligned_score}<span className="text-sm">점</span></p>
+                    </div>
+                  </div>
+                  <p className="text-[10px] text-white/40 mt-2">
+                    {aiAnalysis.dtw.aligned_score > finalScore + 5
+                      ? '👉 자세는 좋으나 박자가 어긋남. 박자만 맞추면 점수 ↑'
+                      : aiAnalysis.dtw.aligned_score < finalScore - 5
+                      ? '👉 박자는 맞으나 자세 정확도 부족'
+                      : '👉 자세와 박자 모두 균형 잡힘'}
+                  </p>
+                </div>
+              )}
 
               {/* 정량 분석 데이터 (DTW + 음악 동기) */}
               {aiAnalysis && (aiAnalysis.dtw || aiAnalysis.musicSync) && (
