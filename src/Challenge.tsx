@@ -3,7 +3,7 @@ import Webcam from 'react-webcam';
 import { Pose, POSE_CONNECTIONS } from '@mediapipe/pose';
 import { Camera } from '@mediapipe/camera_utils';
 import { drawConnectors, drawLandmarks } from '@mediapipe/drawing_utils';
-import { Play, RefreshCw, ArrowLeft, Smartphone, Trophy, User, Sparkles, Loader2, X, TrendingUp, Pause, Film, FastForward, Volume2, VolumeX } from 'lucide-react';
+import { Play, RefreshCw, ArrowLeft, Smartphone, Trophy, User, Sparkles, Loader2, X, TrendingUp, Pause, Film, FastForward, Volume2, VolumeX, Ticket } from 'lucide-react';
 import { collection, onSnapshot, query, where, doc, setDoc } from 'firebase/firestore';
 import { db } from './firebase';
 import { LineChart, Line, XAxis, YAxis, Tooltip, ResponsiveContainer, ReferenceArea } from 'recharts';
@@ -154,6 +154,7 @@ interface Props {
   userTickets?: number;
   userIsPremium?: boolean;
   onAITutorSpend?: () => Promise<boolean>;
+  onOpenChargeSheet?: () => void;
   onBack: () => void;
   onComplete?: (score: number) => void;
 }
@@ -173,6 +174,7 @@ export default function ChallengeComponent({
   userTickets,
   userIsPremium,
   onAITutorSpend,
+  onOpenChargeSheet,
   onBack,
   onComplete
 }: Props) {
@@ -381,13 +383,24 @@ export default function ChallengeComponent({
 
   const handleRequestAITutor = async () => {
     if (!apiUrl || !onAITutorSpend) return;
+    // 티켓 없고 Premium도 아니면 → 충전 시트 자동 오픈
+    if (!userIsPremium && (userTickets ?? 0) < 1) {
+      if (onOpenChargeSheet) {
+        onOpenChargeSheet();
+      } else {
+        setAiError('티켓이 부족합니다. 헤더의 🎟️ 클릭해서 충전해주세요.');
+      }
+      return;
+    }
     setAiBusy(true);
     setAiBusyMsg('Gemini 분석 시작...');
     setAiError('');
     try {
       const ok = await onAITutorSpend();
       if (!ok) {
-        setAiError('티켓이 부족합니다. 충전 후 다시 시도해주세요.');
+        // 결제 직후 race condition 등 예외 케이스 — 충전 시트로 안내
+        if (onOpenChargeSheet) onOpenChargeSheet();
+        else setAiError('티켓 차감 실패. 충전 후 다시 시도해주세요.');
         setAiBusy(false);
         return;
       }
@@ -781,23 +794,34 @@ export default function ChallengeComponent({
           {/* AI 튜터링 버튼 */}
           {apiUrl && onAITutorSpend && (
             <div className="w-full max-w-md mb-6">
-              {!aiFeedback ? (
-                <button
-                  onClick={handleRequestAITutor}
-                  disabled={aiBusy || (!userIsPremium && (userTickets ?? 0) < 1)}
-                  className="w-full bg-gradient-to-r from-[#7C5CFC] via-[#9B7FFF] to-[#D8D8EC] text-black py-5 rounded-2xl font-black flex items-center justify-center gap-3 shadow-[0_0_30px_rgba(124,92,252,0.5)] hover:scale-[1.02] transition-all disabled:opacity-50 disabled:cursor-not-allowed"
-                >
-                  {aiBusy ? <><Loader2 className="animate-spin" size={20} /> {aiBusyMsg || 'Gemini 분석 중...'}</> : (
-                    <>
-                      <Sparkles size={22} />
-                      <span>AI 정밀 분석 받기</span>
-                      <span className="text-xs bg-black/20 px-2 py-1 rounded-full">
-                        {userIsPremium ? '🔓 무제한' : `🎟️ 1티켓 (잔액 ${userTickets ?? 0})`}
-                      </span>
-                    </>
-                  )}
-                </button>
-              ) : (
+              {!aiFeedback ? (() => {
+                const noTickets = !userIsPremium && (userTickets ?? 0) < 1;
+                return (
+                  <button
+                    onClick={handleRequestAITutor}
+                    disabled={aiBusy}
+                    className="w-full bg-gradient-to-r from-[#7C5CFC] via-[#9B7FFF] to-[#D8D8EC] text-black py-5 rounded-2xl font-black flex items-center justify-center gap-3 shadow-[0_0_30px_rgba(124,92,252,0.5)] hover:scale-[1.02] transition-all disabled:opacity-50 disabled:cursor-not-allowed"
+                  >
+                    {aiBusy ? (
+                      <><Loader2 className="animate-spin" size={20} /> {aiBusyMsg || 'Gemini 분석 중...'}</>
+                    ) : noTickets ? (
+                      <>
+                        <Ticket size={22} />
+                        <span>티켓 충전하고 AI 분석 받기</span>
+                        <span className="text-xs bg-black/20 px-2 py-1 rounded-full">잔액 0</span>
+                      </>
+                    ) : (
+                      <>
+                        <Sparkles size={22} />
+                        <span>AI 정밀 분석 받기</span>
+                        <span className="text-xs bg-black/20 px-2 py-1 rounded-full">
+                          {userIsPremium ? '🔓 무제한' : `🎟️ 1티켓 (잔액 ${userTickets ?? 0})`}
+                        </span>
+                      </>
+                    )}
+                  </button>
+                );
+              })() : (
                 <button
                   onClick={() => setShowAIModal(true)}
                   className="w-full bg-white/10 text-white py-4 rounded-2xl font-black flex items-center justify-center gap-2 hover:bg-white/20 transition-all"
@@ -807,7 +831,7 @@ export default function ChallengeComponent({
               )}
               {aiError && <p className="text-red-400 text-xs font-bold mt-2 text-center">{aiError}</p>}
               {!userIsPremium && (userTickets ?? 0) < 1 && !aiFeedback && (
-                <p className="text-white/50 text-xs font-bold mt-2 text-center">티켓이 부족합니다 — 헤더 🎟️ 클릭해서 충전</p>
+                <p className="text-white/50 text-xs font-bold mt-2 text-center">버튼을 누르면 티켓 충전 페이지가 열려요</p>
               )}
             </div>
           )}

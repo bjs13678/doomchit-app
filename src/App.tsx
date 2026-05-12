@@ -1548,6 +1548,7 @@ export default function App() {
                   return false;
                 }
               }}
+              onOpenChargeSheet={() => setShowChargeSheet(true)}
               onBack={() => { setChallengeClipUrl(''); setIsLearning(true); }}
               onComplete={async (score) => {
                 if (!userProfile || !selectedChallenge) return;
