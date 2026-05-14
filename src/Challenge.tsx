@@ -115,10 +115,10 @@ const calculateScore = (targetLandmarks: any, userLandmarks: any) => {
     if (!target || !user) continue;
     if (target.visibility < 0.5 || user.visibility < 0.5) continue;
 
-    // (3) 3D 거리 (z 좌표 포함)
+    // (3) 3D 거리 — z는 노이즈 크므로 0.3배 가중
     const dx = target.x - user.x;
     const dy = target.y - user.y;
-    const dz = (target.z || 0) - (user.z || 0);
+    const dz = ((target.z || 0) - (user.z || 0)) * 0.3;
     const distance = Math.sqrt(dx * dx + dy * dy + dz * dz);
 
     // (4) 관절별 가중치 적용
@@ -129,9 +129,12 @@ const calculateScore = (targetLandmarks: any, userLandmarks: any) => {
   if (totalWeight === 0) return 0;
 
   const avgDistance = totalWeightedDistance / totalWeight;
-  // 정규화된 좌표계라 단위가 어깨너비. 1.0 어깨너비 차이 = 0점
-  const maxDistance = 1.0;
-  let score = 100 - (avgDistance / maxDistance) * 100;
+  // 정규화된 좌표계 단위는 어깨너비. 1.3까지 허용 (이전 1.0보다 관대)
+  const maxDistance = 1.3;
+  // 비선형 곡선: 작은 어긋남은 거의 만점, 큰 어긋남부터 빠르게 감소
+  // score = 100 × (1 - ratio²) — 댄스 게임 표준 곡선
+  const ratio = Math.min(avgDistance / maxDistance, 1.0);
+  const score = 100 * (1 - ratio * ratio);
   return Math.round(Math.max(0, Math.min(100, score)));
 };
 
@@ -219,6 +222,9 @@ export default function ChallengeComponent({
   
   const isPlayingRef = useRef(false);
   const scoreDataRef = useRef({ sum: 0, count: 0 });
+  // 실시간 점수 smoothing용 (3프레임 이동 평균)
+  const recentScoresRef = useRef<number[]>([]);
+  const SMOOTH_WINDOW = 3;
   const timelineRef = useRef<TimelinePoint[]>([]);
   const playStartTimeRef = useRef<number>(0);
   const lastTimelinePushRef = useRef<number>(0);
@@ -497,7 +503,13 @@ export default function ChallengeComponent({
         drawLandmarks(ctx, results.poseLandmarks, { color: '#FF0000', lineWidth: 2, radius: 4 });
         
         if (isPlayingRef.current) {
-          const currentScore = calculateScore(targetLandmarksRef.current, results.poseLandmarks);
+          const rawScore = calculateScore(targetLandmarksRef.current, results.poseLandmarks);
+          // 3프레임 이동 평균으로 깜빡임 완화
+          recentScoresRef.current.push(rawScore);
+          if (recentScoresRef.current.length > SMOOTH_WINDOW) recentScoresRef.current.shift();
+          const currentScore = Math.round(
+            recentScoresRef.current.reduce((s, v) => s + v, 0) / recentScoresRef.current.length
+          );
           setScore(currentScore);
           scoreDataRef.current.sum += currentScore;
           scoreDataRef.current.count += 1;
@@ -622,6 +634,7 @@ export default function ChallengeComponent({
           videoRef.current.play();
           setIsPlaying(true);
           scoreDataRef.current = { sum: 0, count: 0 };
+          recentScoresRef.current = [];
           timelineRef.current = [];
           lastTimelinePushRef.current = 0;
           lastPosePushRef.current = 0;
