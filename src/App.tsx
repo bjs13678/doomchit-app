@@ -218,6 +218,17 @@ const AnalysisProgressView = ({ analysis, onDismiss }: { analysis: AnalysisState
       <p className="text-xs text-gray-400 text-center font-bold max-w-sm">
         다른 탭으로 이동해도 분석은 계속됩니다.<br />완료되면 이 화면으로 돌아오세요.
       </p>
+
+      <button
+        onClick={() => {
+          if (confirm('분석을 정말 취소하시겠어요?\n진행 중인 결과는 저장되지 않습니다.')) {
+            onDismiss();
+          }
+        }}
+        className="text-sm font-bold text-gray-400 hover:text-red-500 transition-all underline-offset-4 hover:underline"
+      >
+        분석 취소
+      </button>
     </div>
   );
 };
@@ -1467,7 +1478,7 @@ export default function App() {
                         <Play size={20} className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 text-white opacity-0 group-hover:opacity-100" />
                         <button
                           onClick={(e) => { e.stopPropagation(); handleDeleteChallenge(c); }}
-                          className="absolute top-1.5 right-1.5 p-1.5 rounded-full bg-black/50 text-white opacity-0 group-hover:opacity-100 hover:bg-red-500 transition-all"
+                          className="absolute top-1.5 right-1.5 p-1.5 rounded-full bg-black/60 text-white md:opacity-0 md:group-hover:opacity-100 hover:bg-red-500 transition-all"
                           aria-label="삭제"
                         >
                           <Trash2 size={14} />
