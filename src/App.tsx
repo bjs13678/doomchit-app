@@ -1043,6 +1043,10 @@ export default function App() {
         } else if (result.status === 'error') {
           clearInterval(poll);
           setAnalysis(prev => prev && prev.jobId === jobId ? { ...prev, status: 'error', message: result.message || '알 수 없는 오류' } : prev);
+        } else if (result.status === 'cancelled') {
+          // 백엔드에서 취소 확인됨 → 폴링 정지 + 상태 정리
+          clearInterval(poll);
+          setAnalysis(null);
         } else {
           setAnalysis(prev => prev && prev.jobId === jobId ? { ...prev, progress: result.progress ?? prev.progress, message: result.message ?? prev.message } : prev);
         }
@@ -1367,7 +1371,20 @@ export default function App() {
             {activeTab === 'feed' && <FeedView userProfile={userProfile} followingIds={followingIds} onToggleFollow={toggleFollow} onSelectChallenge={c => { setSelectedChallenge(c); setIsLearning(true); }} />}
             {activeTab === 'upload' && (
               analysis
-                ? <AnalysisProgressView analysis={analysis} onDismiss={() => setAnalysis(null)} />
+                ? <AnalysisProgressView
+                    analysis={analysis}
+                    onDismiss={async () => {
+                      // 진행 중인 분석이면 백엔드에도 취소 요청
+                      if (analysis.status === 'analyzing' && analysis.jobId) {
+                        try {
+                          await fetch(`${API_URL}/cancel/${analysis.jobId}`, { method: 'POST' });
+                        } catch (err) {
+                          console.warn('cancel request failed', err);
+                        }
+                      }
+                      setAnalysis(null);
+                    }}
+                  />
                 : <UploadView onStartAnalysis={(data) => setAnalysis({
                     jobId: data.jobId,
                     status: 'analyzing',
